@@ -1,0 +1,77 @@
+# Python bytecode and test/tool caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage*
+htmlcov/
+
+# Virtual environments and local secrets
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+!.env.example
+
+# Logs, temporary files, and notebook checkpoints
+*.log
+*.tmp
+*.swp
+*~
+.ipynb_checkpoints/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+
+# Build/package artifacts
+build/
+dist/
+*.egg-info/
+
+# Training and evaluation outputs (at any expert directory)
+**/runs/
+**/outputs/
+**/results/
+**/chkpt/
+**/chkpt_*/
+**/release/
+
+# Downloaded model/config caches
+.cache/
+**/.cache/
+**/hf_cache/
+**/m2d_cache/
+**/m2d_layout/
+
+# Model weights and checkpoints; keep source code and configs
+**/weights/*.pt
+**/weights/*.pth
+**/weights/*.ckpt
+**/weights/*.safetensors
+**/weights/*_run/
+**/checkpoints/*.pt
+**/checkpoints/*.pth
+**/checkpoints/*.ckpt
+**/checkpoints/*.safetensors
+**/best_model.pt
+**/last.pt
+**/last_checkpoint.pt
+**/best_expert4.pt
+**/last_expert4.pt
+
+# Local datasets, if placed inside this repository
+/data/raw/
+/data/processed/
+/data/XACLE_Challenge_2027_development_dataset/
+/data/XACLE_dataset/
+/data/**/wav/
+/data/**/*.wav
+/data/**/*.flac
+/data/**/*.mp3

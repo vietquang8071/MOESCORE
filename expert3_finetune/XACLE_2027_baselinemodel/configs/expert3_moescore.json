@@ -1,0 +1,56 @@
+{
+  "dataset_root": "../../../data/XACLE_Challenge_2027_development_dataset/XACLE_Challenge_2027_development_dataset",
+  "train_csv": "meta_data/train_average.csv",
+  "validation_csv": "meta_data/validation_average.csv",
+  "test_csv": "meta_data/test_average.csv",
+  "wav_dir": "wav",
+  "filename_column": "wav_file_name",
+  "caption_column": "text",
+  "score_column": "average_score",
+  "expected_counts": {
+    "train": 7500,
+    "validation": 3000,
+    "test": 3000
+  },
+  "m2d_checkpoint": "../weights/checkpoint-30.pth",
+  "m2d_checkpoint_sha256": "238521603c04862ab151cdd80980b591cb36ebe844d43203992fac9ef085c8a1",
+  "cache_dir": "./hf_cache",
+  "output_dir": "./runs/expert3_moescore",
+  "batch_size": 8,
+  "gradient_accumulation_steps": 1,
+  "drop_last": true,
+  "val_batch_size": 1,
+  "lr": 0.00001,
+  "optimizer": {
+    "name": "Adam",
+    "betas": [0.9, 0.999]
+  },
+  "scheduler": {
+    "name": "linear_warmup_linear_decay",
+    "warmup_ratio": 0.1
+  },
+  "num_workers": 0,
+  "epochs": 50,
+  "max_len": 10,
+  "early_stop_patience": 50,
+  "seed": 42,
+  "sample_rate": 16000,
+  "amp": true,
+  "activation_checkpointing": true,
+  "concat_assignment": "released",
+  "loss": {
+    "loss_weights": [1.0, 0.5],
+    "clipped_mse": {
+      "tau": 0.25,
+      "mode": "utt",
+      "beta": 0.99,
+      "cbl": false
+    },
+    "contrastive": {
+      "margin": 0.1,
+      "beta": 0.99,
+      "cbl": false
+    }
+  },
+  "device": "cuda"
+}

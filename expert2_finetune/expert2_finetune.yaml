@@ -1,0 +1,21 @@
+# Paths relative to the MOESCORE repository root.
+data_root: ../../data/XACLE_Challenge_2027_development_dataset/XACLE_Challenge_2027_development_dataset
+expected_train_pairs: 7500
+expected_validation_pairs: 3000
+expected_test_pairs: 3000
+mga_source: MGA-CLAP
+mga_config: MGA-CLAP/settings/inference_example.yaml
+mga_checkpoint: weights/mga-clap.pt
+output: weights/expert2_best.pt
+freeze_policy: partial  # partial: last two blocks; full: all encoder blocks
+device: cuda
+seed: 42
+batch_size: 8
+val_batch_size: 8
+num_workers: 0
+epochs: 50
+patience: 10
+lr: 0.00001
+warmup_ratio: 0.1
+grad_clip: 2.0
+log_every: 100

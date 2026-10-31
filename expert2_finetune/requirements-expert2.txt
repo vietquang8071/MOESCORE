@@ -1,0 +1,7 @@
+# Install a matching PyTorch/CUDA build separately.
+numpy
+scipy
+PyYAML
+transformers
+torchlibrosa
+librosa

@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from unilm.beats.BEATs import BEATs, BEATsConfig
+from MOESCORE.expert4_finetune.unilm.beats.BEATs import BEATs, BEATsConfig
 import laion_clap
 
 

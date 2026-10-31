@@ -1,0 +1,29 @@
+# Edit the paths in the notebook or here. No Drive layout is assumed.
+resources:
+  train_csv: null
+  validation_csv: null
+  test_csv: null
+  train_audio_dir: null
+  validation_audio_dir: null
+  test_audio_dir: null
+  beats_checkpoint: null
+  clap_checkpoint: null
+  unilm_source_dir: null
+  output_dir: null
+training:
+  batch_size: 8
+  validation_batch_size: 8
+  epochs: 50  # Public config value; Expert 4 schedule unconfirmed.
+  learning_rate: 1.0e-5
+  adam_betas: [0.9, 0.999]
+  warmup_ratio: 0.1  # Implementation assumption; paper gives no value.
+  seed: 42
+  num_workers: 0
+  early_stop_patience: 10  # Implementation assumption.
+  amp: true
+  gradient_clip_norm: null
+loss:
+  tau: 0.25
+  margin: 0.1
+  beta: 1.0
+  gamma: 0.5

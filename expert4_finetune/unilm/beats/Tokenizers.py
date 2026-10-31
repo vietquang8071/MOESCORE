@@ -13,10 +13,10 @@ import torch.nn as nn
 from torch.nn import LayerNorm
 import torchaudio.compliance.kaldi as ta_kaldi
 
-from MOESCORE.expert4_finetune.unilm.beats.backbone import (
+from .backbone import (
     TransformerEncoder,
 )
-from MOESCORE.expert4_finetune.unilm.beats.quantizer import (
+from .quantizer import (
     NormEMAVectorQuantizer,
 )
 

@@ -1,11 +1,13 @@
 import torch
 import torch.nn as nn
 import yaml
-from mga_model import ASE
+from importlib import import_module
+
+ASE = import_module("expert2_finetune.MGA-CLAP.models.ase_model").ASE
 import torch.nn.functional as F
-from m2d_model import PortableM2D
+from expert3_finetune.XACLE_2027_baselinemodel.models.m2d.vendor.portable_m2d import PortableM2D
 import laion_clap
-from wrapper import TextEncoder, AudioEncoder
+from .wrapper import TextEncoder, AudioEncoder
 
 
 class TemporalAlignModel(nn.Module):

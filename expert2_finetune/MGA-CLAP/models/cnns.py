@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchlibrosa.augmentation import SpecAugmentation
-from models.feature_extractor import AudioFeature
+from .feature_extractor import AudioFeature
 
 
 def init_layer(layer):

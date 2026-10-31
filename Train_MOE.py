@@ -5,7 +5,7 @@ import time
 from torch.utils.data import DataLoader
 from scipy.stats import spearmanr
 
-from .data.dataset import get_dataset
+from data.dataset import get_dataset
 from loss.loss_function import get_loss_function
 import utils as utils
 

@@ -1,6 +1,6 @@
 import torch.nn as nn
 import torch
-from Basic_comp import Expert1, Expert2, Expert3, Expert4
+from .Basic_comp import Expert1, Expert2, Expert3, Expert4
 
 def load_pretrain_weight(model, checkpoint_path):
     model.load_state_dict(torch.load(checkpoint_path))

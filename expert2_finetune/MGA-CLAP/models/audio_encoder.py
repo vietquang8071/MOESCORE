@@ -6,8 +6,8 @@
 
 import torch
 import torch.nn as nn
-from models.cnns import ResNet38, Cnn14
-from models.htsat import HTSAT_Swin_Transformer
+from .cnns import ResNet38, Cnn14
+from .htsat import HTSAT_Swin_Transformer
 
 class AudioEncoder(nn.Module):
 

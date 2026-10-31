@@ -6,8 +6,8 @@
 import math
 import torch
 import torch.nn as nn
-from models.audio_encoder import AudioEncoder
-from models.text_encoder import TextEncoder
+from .audio_encoder import AudioEncoder
+from .text_encoder import TextEncoder
 import torch.nn.functional as F
 import copy
 from torch import distributed as dist

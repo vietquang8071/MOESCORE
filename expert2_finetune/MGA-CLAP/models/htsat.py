@@ -22,7 +22,7 @@ from torch.nn.init import _calculate_fan_in_and_fan_out
 from itertools import repeat
 from typing import List
 
-from models.feature_extractor import AudioFeature
+from .feature_extractor import AudioFeature
 
 
 def interpolate(x, ratio):

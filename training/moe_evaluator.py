@@ -34,23 +34,37 @@ def compute_metrics(prediction_raw: Any, target_raw: Any) -> dict[str, Any]:
         raise ValueError("metric inputs must be finite")
     constant_input = np.ptp(prediction) == 0.0 or np.ptp(target) == 0.0
     srcc: Optional[float]
+    lcc: Optional[float]
+    ktau: Optional[float]
     if constant_input:
         srcc = None
         srcc_status = "UNDEFINED_CONSTANT_INPUT"
+        lcc = None
+        lcc_status = "UNDEFINED_CONSTANT_INPUT"
+        ktau = None
+        ktau_status = "UNDEFINED_CONSTANT_INPUT"
     else:
-        from scipy.stats import spearmanr
+        from scipy.stats import kendalltau, pearsonr, spearmanr
 
-        correlation = float(spearmanr(target, prediction).statistic)
-        if not math.isfinite(correlation):
-            srcc, srcc_status = None, "UNDEFINED_NUMERICAL_RESULT"
-        else:
-            srcc, srcc_status = correlation, "DEFINED"
+        def defined_correlation(value: Any) -> tuple[Optional[float], str]:
+            correlation = float(value)
+            if not math.isfinite(correlation):
+                return None, "UNDEFINED_NUMERICAL_RESULT"
+            return correlation, "DEFINED"
+
+        srcc, srcc_status = defined_correlation(spearmanr(target, prediction).statistic)
+        lcc, lcc_status = defined_correlation(pearsonr(target, prediction).statistic)
+        ktau, ktau_status = defined_correlation(kendalltau(target, prediction, variant="b").statistic)
     errors = prediction - target
     return {
         "score_scale": "raw_0_to_10",
         "sample_count": int(prediction.size),
         "srcc": srcc,
         "srcc_status": srcc_status,
+        "lcc": lcc,
+        "lcc_status": lcc_status,
+        "ktau": ktau,
+        "ktau_status": ktau_status,
         "mse": float(np.mean(errors * errors)),
         "mae": float(np.mean(np.abs(errors))),
     }

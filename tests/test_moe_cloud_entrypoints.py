@@ -82,12 +82,15 @@ class MoeCloudEntrypointTests(unittest.TestCase):
             self.assertEqual(trained["status"], "PASS")
             self.assertEqual(trained["global_step"], 2)
             self.assertTrue(Path(trained["latest_checkpoint"]).is_file())
+            for name in ("srcc", "lcc", "ktau", "mse", "mae"):
+                self.assertIn(name, trained["history"][0]["validation_metrics_raw"])
 
             evaluated = evaluate_checkpoint(config, trained["latest_checkpoint"], device_override="cpu")
             self.assertEqual(evaluated["status"], "PASS")
             self.assertEqual(evaluated["sample_count"], 4)
             self.assertEqual(evaluated["optimizer_steps"], 0)
-            self.assertIn("srcc", evaluated["metrics_raw_scale"])
+            for name in ("srcc", "lcc", "ktau", "mse", "mae"):
+                self.assertIn(name, evaluated["metrics_raw_scale"])
 
             csv_path = Path(temporary) / "submission.csv"
             inferred = infer_checkpoint(

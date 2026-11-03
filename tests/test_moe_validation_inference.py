@@ -1,4 +1,5 @@
 import csv
+import json
 import tempfile
 import unittest
 
@@ -20,6 +21,87 @@ class MoeValidationInferenceTests(unittest.TestCase):
         constant = compute_metrics(torch.ones(4), torch.tensor([1.0, 2.0, 3.0, 4.0]))
         self.assertIsNone(constant["srcc"])
         self.assertEqual(constant["srcc_status"], "UNDEFINED_CONSTANT_INPUT")
+
+    def test_all_correlations_are_one_for_perfect_positive_ordering(self):
+        metrics = compute_metrics([1.0, 2.0, 3.0, 4.0], [2.0, 4.0, 6.0, 8.0])
+
+        for name in ("srcc", "lcc", "ktau"):
+            with self.subTest(metric=name):
+                self.assertAlmostEqual(metrics[name], 1.0, places=12)
+                self.assertEqual(metrics[f"{name}_status"], "DEFINED")
+
+    def test_all_correlations_are_minus_one_for_perfect_negative_ordering(self):
+        metrics = compute_metrics([4.0, 3.0, 2.0, 1.0], [1.0, 2.0, 3.0, 4.0])
+
+        for name in ("srcc", "lcc", "ktau"):
+            with self.subTest(metric=name):
+                self.assertAlmostEqual(metrics[name], -1.0, places=12)
+                self.assertEqual(metrics[f"{name}_status"], "DEFINED")
+
+    def test_kendall_metric_uses_tau_b_for_tied_ranks(self):
+        metrics = compute_metrics([1.0, 1.0, 2.0, 3.0], [1.0, 2.0, 3.0, 4.0])
+
+        self.assertAlmostEqual(metrics["ktau"], 5.0 / (30.0 ** 0.5), places=12)
+        self.assertEqual(metrics["ktau_status"], "DEFINED")
+
+    def test_constant_inputs_make_all_correlations_undefined(self):
+        for prediction, target in (
+            ([3.0, 3.0, 3.0], [1.0, 2.0, 3.0]),
+            ([1.0, 2.0, 3.0], [2.0, 2.0, 2.0]),
+        ):
+            metrics = compute_metrics(prediction, target)
+            for name in ("srcc", "lcc", "ktau"):
+                with self.subTest(prediction=prediction, target=target, metric=name):
+                    self.assertIsNone(metrics[name])
+                    self.assertEqual(metrics[f"{name}_status"], "UNDEFINED_CONSTANT_INPUT")
+
+    def test_metrics_reject_mismatched_shapes_and_nonfinite_values(self):
+        with self.assertRaisesRegex(ValueError, "same non-empty shape"):
+            compute_metrics([1.0, 2.0], [1.0])
+        for invalid in ([1.0, float("nan")], [1.0, float("inf")]):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "must be finite"):
+                    compute_metrics(invalid, [1.0, 2.0])
+
+    def test_metrics_preserve_mse_mae_and_are_json_serializable(self):
+        metrics = compute_metrics([1.0, 2.0, 3.0], [2.0, 2.0, 5.0])
+
+        self.assertAlmostEqual(metrics["mse"], 5.0 / 3.0, places=12)
+        self.assertAlmostEqual(metrics["mae"], 1.0, places=12)
+        self.assertEqual(metrics["score_scale"], "raw_0_to_10")
+        self.assertEqual(metrics["sample_count"], 3)
+        json.dumps(metrics, allow_nan=False)
+
+    def test_validation_correlations_are_computed_over_all_batches(self):
+        gate = GatingNetwork().eval()
+        evaluator = MoeGateEvaluator(gate)
+        # The two within-batch rank correlations are +1 and -1, while the
+        # complete validation-set SRCC is +0.8.  The gate prediction equals
+        # the requested raw prediction because all four scores match per row.
+        batches = []
+        for batch_index, predictions_and_targets in enumerate(
+            (((1.0, 1.0), (2.0, 2.0)), ((3.0, 4.0), (4.0, 3.0)))
+        ):
+            prediction_raw = torch.tensor([pair[0] for pair in predictions_and_targets])
+            target_raw = torch.tensor([pair[1] for pair in predictions_and_targets])
+            scores = ((prediction_raw - 5.0) / 5.0).unsqueeze(1).expand(-1, 4).clone()
+            ids = [f"validation:{batch_index}:{row}" for row in range(2)]
+            batches.append({
+                "split": "validation",
+                "sample_ids": ids,
+                "wave_file_names": [f"{sample_id}.wav" for sample_id in ids],
+                "scores": scores,
+                "features": torch.zeros(2, 7936),
+                "labels_raw": target_raw,
+                "labels_scale": "raw_0_to_10",
+            })
+
+        result = evaluator.evaluate(batches)
+
+        self.assertAlmostEqual(result["metrics"]["srcc"], 0.8, places=6)
+        self.assertAlmostEqual(result["metrics"]["lcc"], 0.8, places=6)
+        self.assertAlmostEqual(result["metrics"]["ktau"], 2.0 / 3.0, places=6)
+        self.assertEqual(result["metrics"]["sample_count"], 4)
 
     def test_inference_needs_no_labels_preserves_order_and_uses_raw_scale(self):
         torch.manual_seed(7)

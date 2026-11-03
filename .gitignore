@@ -51,6 +51,7 @@ dist/
 **/m2d_layout/
 
 # Model weights and checkpoints; keep source code and configs
+**/weights/
 **/weights/*.pt
 **/weights/*.pth
 **/weights/*.ckpt

@@ -1,0 +1,59 @@
+schema_version: 1
+
+# Path roots are relative to this file. Explicit function arguments, then
+# MOESCORE_* environment variables, take precedence over these values.
+paths:
+  project_root: ..
+  data_root: ../data
+  resource_root: ..
+
+runtime:
+  device: auto
+  offline: true
+  cache_dir: .cache/huggingface
+
+data:
+  train_csv: metadata/train.csv
+  validation_csv: metadata/validation.csv
+  test_csv: metadata/test.csv
+  audio_root: audio
+
+experts:
+  expert1:
+    pretrained_checkpoint: weights/laion-clap.pt
+    finetuned_checkpoint: weights/finetuned_weights/expert1_best.pt
+    enable_fusion: false
+
+  expert2:
+    source_dir: expert2_finetune/MGA-CLAP
+    architecture_yaml: expert2_finetune/MGA-CLAP/settings/inference_example.yaml
+    training_config: expert2_finetune/expert2_finetune.yaml
+    pretrained_checkpoint: weights/mga-clap.pt
+    finetuned_checkpoint: weights/finetuned_weights/expert2_best.pt
+    freeze_policy: partial
+
+  expert3:
+    source_dir: expert3_finetune/XACLE_2027_baselinemodel
+    base_checkpoint: weights/checkpoint-30.pth
+    expected_base_sha256: 238521603c04862ab151cdd80980b591cb36ebe844d43203992fac9ef085c8a1
+    finetuned_checkpoint: weights/finetuned_weights/expert3_best.pt
+    concat_assignment: released
+    model_config: expert3_finetune/XACLE_2027_baselinemodel/configs/expert3_moescore.json
+
+  expert4:
+    beats_checkpoint: weights/BEATs_iter3_plus_AS2M.pt
+    clap_checkpoint: weights/laion-clap.pt
+    # Set this to the standalone UniLM checkout whose source identity matches
+    # the fine-tuned Expert 4 checkpoint. The bundled expert4_finetune/unilm
+    # copy is not equivalent; factories must fail on identity mismatch.
+    unilm_source_dir: /path/to/unilm_expert4_original
+    finetuned_checkpoint: weights/finetuned_weights/expert4_best.pt
+
+gate:
+  expert_order:
+    - expert1
+    - expert2
+    - expert3
+    - expert4
+  hidden_dim: 512
+  dropout: 0.1

@@ -218,7 +218,7 @@ def main():
     if not trainable:
         raise RuntimeError("Expert 1 has no trainable parameters")
     print(f"Trainable parameters: {sum(p.numel() for p in trainable):,}", flush=True)
-    optimizer = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=1e-4)
+    optimizer = torch.optim.Adam(trainable, lr=args.lr, weight_decay=1e-4)
     total_steps = len(train_loader) * args.epochs
     warmup_steps = int(total_steps * args.warmup_ratio)
     scheduler = get_linear_schedule_with_warmup(

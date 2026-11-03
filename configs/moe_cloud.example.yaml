@@ -12,7 +12,7 @@ data:
 output_dir: ../runs/moe_gating
 
 training:
-  batch_size: 16
+  batch_size: 8
   max_epochs: 50
   learning_rate: 0.00001
   weight_decay: 0.0001
@@ -34,7 +34,7 @@ training:
       cbl: false
 
 validation:
-  batch_size: 1
+  batch_size: 8
 
 inference:
   batch_size: 64

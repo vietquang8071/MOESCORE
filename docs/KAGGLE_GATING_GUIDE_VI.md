@@ -59,23 +59,23 @@ Nếu tìm thấy nhiều root hợp lệ, điền `DATASET_ROOT` ở ô cấu h
 
 ### 2.2. Tám checkpoint đã chốt
 
-Thêm dataset có điểm mount chính xác `/kaggle/input/moescore-checkpoints/`:
+Theo danh sách tệp thực tế đã xác nhận, notebook dùng `WEIGHTS_ROOT = Path('/kaggle/input/datasets/qnv8071/xacle-weights/weights')`:
 
 ```text
-moescore-checkpoints/
+weights/
 ├── pretrained/
 │   ├── laion-clap.pt
 │   ├── mga-clap.pt
-│   ├── m2d-base.pth
-│   └── beats.pt
-└── finetuned/
+│   ├── checkpoint-30.pth
+│   └── BEATs_iter3_plus_AS2M.pt
+└── finetuned_weights/
     ├── expert1_best.pt
     ├── expert2_best.pt
     ├── expert3_best.pt
     └── expert4_best.pt
 ```
 
-Giữ nguyên các tên này. E1/E2 khởi tạo pretrained rồi khôi phục đầy đủ fine-tuned state. E3/E4 khởi tạo base/pretrained rồi khôi phục phần fine-tuned theo loader gốc. Factory tiếp tục kiểm tra schema, key, shape và fingerprint; không có fallback sang pretrained-only. Chỉ dùng checkpoint đáng tin cậy, vì một số loader gốc cần giải tuần tự checkpoint Python của dự án.
+Giữ nguyên các tệp hiện có. Nếu vị trí mount khác, sửa `WEIGHTS_ROOT`; nếu tên tệp/thư mục khác, sửa các đường dẫn trong `EXPERT_CHECKPOINTS`. Mapping này được truyền vào `generate_configs()` để cả cấu hình YAML lưu trên đĩa và cấu hình runtime thống nhất. E1/E2 khởi tạo pretrained rồi khôi phục đầy đủ fine-tuned state. E3/E4 khởi tạo base/pretrained rồi khôi phục phần fine-tuned theo loader gốc. Factory tiếp tục kiểm tra schema, key, shape và fingerprint; không có fallback sang pretrained-only. Chỉ dùng checkpoint đáng tin cậy, vì một số loader gốc cần giải tuần tự checkpoint Python của dự án.
 
 ### 2.3. Mã nguồn
 
@@ -87,16 +87,27 @@ Khi tắt mạng, đính kèm một bản source đầy đủ của repository c
 
 ### 2.4. Cache mô hình văn bản và phụ thuộc
 
-Các checkpoint audio không thay thế toàn bộ tài nguyên tokenizer/model mà loader gốc cần. Chuẩn bị cache của đúng hai định danh:
+Các checkpoint audio không thay thế toàn bộ tài nguyên tokenizer/model mà loader gốc cần. Chuẩn bị cache của đúng ba định danh mà nguồn expert gọi:
 
 - `roberta-base`;
+- `bert-base-uncased` cho E2: cần config và tokenizer; trọng số text encoder được phục hồi từ checkpoint MGA;
 - `google-bert/bert-base-uncased`.
 
-Điền `HF_CACHE_DIR` tới thư mục hub cache chứa trực tiếp `models--roberta-base/` và `models--google-bert--bert-base-uncased/`, gồm `refs/`, `snapshots/`, `blobs/`, tokenizer/config và trọng số model. Khi tạo dataset cache, cần bảo toàn nội dung các liên kết; không để liên kết trỏ ra ngoài dataset đã upload. Bộ kiểm tra sử dụng chế độ chỉ đọc tài nguyên cục bộ để xác nhận các tệp cần thiết.
+Điền `HF_CACHE_DIR` tới thư mục hub cache chứa trực tiếp `models--roberta-base/`, `models--bert-base-uncased/` và `models--google-bert--bert-base-uncased/`, gồm `refs/`, `snapshots/`, `blobs/` và các tài nguyên cần thiết. BERT dùng tên ngắn và tên có namespace có thể được lưu trong hai thư mục cache khác nhau; có một tên không bảo đảm tên còn lại hoạt động offline. Khi tạo dataset cache, cần bảo toàn nội dung các liên kết; không để liên kết trỏ ra ngoài dataset đã upload.
 
 Notebook đặt cùng thư mục cho `HF_HOME`, `HF_HUB_CACHE`, `TRANSFORMERS_CACHE` và `runtime.cache_dir`, vì loader E3 truyền `cache_dir` tường minh. Không trỏ nhầm vào thư mục cha của hub cache. Tự dò chỉ dùng một số vị trí giới hạn trong Kaggle Input; nếu nhiều cache hợp lệ, phải chọn tường minh.
 
-Nếu có mạng và được phép tải các tài nguyên này, bật `ALLOW_CACHE_DOWNLOAD=True`; notebook chỉ tải hai định danh nêu trên. Đặt cache tải mới trong `/kaggle/working/hf_cache`, vì Kaggle Input chỉ đọc. Sau chuẩn bị, extraction bật offline cho các thư viện Hub.
+Nếu có mạng và được phép tải các tài nguyên này, bật `ALLOW_CACHE_DOWNLOAD=True`; notebook chuẩn bị đúng các định danh nêu trên. Đặt cache tải mới trong `/kaggle/working/hf_cache`, vì Kaggle Input chỉ đọc. Chuẩn bị/kiểm cache chạy qua `scripts/prepare_moe_text_cache.py` trong tiến trình mới, tránh cờ offline hoặc đường dẫn cache đã nạp trước đó trong kernel. E2 được kiểm bằng đúng `BertConfig` và `BertTokenizer` với cách tìm cache mặc định của loader gốc. Sau chuẩn bị, extraction vẫn offline.
+
+Lệnh chuẩn bị cache riêng khi có mạng:
+
+```bash
+python scripts/prepare_moe_text_cache.py \
+  --cache-dir /kaggle/working/hf_cache --download \
+  --report-json /kaggle/working/moe_text_cache.json
+```
+
+Bỏ `--download` để chỉ kiểm tra offline. Nếu Expert 2 báo thiếu config trong cache trong khi preflight cũ đã PASS, kiểm tra riêng định danh `bert-base-uncased`; không đổi nó thành model ID khác trong YAML expert.
 
 Tệp chung `requirements-kaggle.txt` khai báo các thư viện cho cả bốn expert và pipeline cổng, gồm `torchlibrosa`, `nnAudio` và thư viện vẽ biểu đồ. Một số phiên bản xử lý audio/model được chốt theo môi trường cục bộ đã xác minh; đây chưa phải bằng chứng một môi trường Kaggle mới đã chạy thành công toàn bộ.
 
@@ -131,7 +142,7 @@ Môi trường cục bộ đã dùng Python 3.10, NumPy 1.26, SciPy 1.15, cùng 
 1. Tạo notebook Python mới trong Kaggle và nhập tệp `kaggle_train_moe_gating.ipynb` bằng chức năng nhập notebook của giao diện.
 2. Mở phần cài đặt notebook, chọn bộ tăng tốc GPU ở mục `Accelerator`. Tên lựa chọn GPU phụ thuộc tài khoản và tài nguyên sẵn có.
 3. Bật tùy chọn Internet nếu cần clone source hoặc tải tài nguyên đã được cho phép. Khi mọi tài nguyên đã mount cục bộ, đặt các cờ tải về thành `False` và chạy offline.
-4. Dùng chức năng thêm dữ liệu đầu vào, thường được ghi là `Add Input`, để đính kèm XACLE, `moescore-checkpoints`, cache Hugging Face và source nếu chạy offline.
+4. Dùng chức năng thêm dữ liệu đầu vào, thường được ghi là `Add Input`, để đính kèm XACLE, `xacle-weights`, cache Hugging Face và source nếu chạy offline.
 5. Điền các đường dẫn trong ô cấu hình. Giữ mặc định:
 
    ```python
@@ -312,7 +323,7 @@ Khi chuyển phiên: đính kèm artifact đã lưu vào Input, xác minh đủ 
 | CUDA không khả dụng | Bật GPU trong cài đặt và khởi động lại phiên nếu cần; chạy lại ô môi trường. |
 | CUDA OOM | Giảm batch riêng expert về 1; dừng tiến trình lỗi, xác nhận VRAM trống rồi chạy lại extraction. Giữ SHARD_SIZE và provenance. Nếu B=1 vẫn lỗi, cần GPU có đủ VRAM. |
 | Thiếu hoặc xung đột phụ thuộc | Xem tên gói và traceback, chuẩn bị wheel tương thích hoặc cài gói tường minh. Không cài lại toàn bộ PyTorch/CUDA theo một requirements cũ. |
-| Cache tokenizer/model không đủ | Điền đúng hub cache, kiểm config/tokenizer/trọng số của hai model đúng tên; chuẩn bị cache offline hoặc bật tải có chủ ý. Không thay model ID. |
+| Cache tokenizer/model không đủ | Điền đúng hub cache, kiểm đủ ba tên ở mục 2.4. Đặc biệt E2 cần `bert-base-uncased`, còn E3 gọi `google-bert/bert-base-uncased`. Chạy lại preflight có cho phép tải, hoặc CLI chuẩn bị cache trong tiến trình mới. Không thay model ID trong expert. |
 | UniLM import/fingerprint không khớp | Dùng source đi kèm đúng revision; chỉ hai khác biệt import đã rà soát được chấp nhận. Đừng sửa model rồi cập nhật fingerprint cho khớp giả. |
 | Provenance khác khi resume | So checkpoint SHA, source/preprocessing hash, ID/CSV và config. Khôi phục đúng artifact hoặc dùng root mới cho một lượt trích xuất mới. |
 | Shard checksum sai | Giữ log và bản lỗi; khôi phục shard tốt từ artifact gốc hoặc tính lại đúng shard trên bản writable. Không sửa checksum thủ công. |

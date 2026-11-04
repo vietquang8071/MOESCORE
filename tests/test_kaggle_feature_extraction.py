@@ -70,17 +70,35 @@ class ExtractionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "reviewed original"):
             verify_bundled_import_equivalence(ROOT / "expert4_finetune/unilm", {**expected, "sha256": "0" * 64})
 
+    def test_user_checkpoint_mapping_is_used_in_both_yaml_and_resolved_config(self):
+        from scripts.extract_moe_feature_store import CHECKPOINT_FIELDS
+        import yaml
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mapping = {expert: {field: root / "custom" / expert / f"{field}.pt" for field in fields}
+                       for expert, fields in CHECKPOINT_FIELDS.items()}
+            config_path, _, resolved = generate_configs(ROOT, root / "data", root / "weights", root / "cache",
+                root / "stores", root / "output", root, expert_checkpoints=mapping)
+            saved = yaml.safe_load(config_path.read_text())
+            for expert, fields in mapping.items():
+                for field, path in fields.items():
+                    self.assertEqual(saved["experts"][expert][field], str(path))
+                    self.assertEqual(resolved["experts"][expert][field], path)
+            with self.assertRaisesRegex(ValueError, "exactly the four"):
+                generate_configs(ROOT, root / "data", root / "weights", root / "cache", root / "stores",
+                                 root / "output", root, expert_checkpoints={"expert1": mapping["expert1"]})
+
     def test_label_free_test_projection_and_sequential_shard_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             dataset_root, weights, output = root / "data", root / "weights", root / "store"
             audio_fixture(dataset_root)
-            for name in ("laion-clap.pt", "mga-clap.pt", "m2d-base.pth", "beats.pt"):
+            for name in ("laion-clap.pt", "mga-clap.pt", "checkpoint-30.pth", "BEATs_iter3_plus_AS2M.pt"):
                 path = weights / "pretrained" / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(name.encode())  # Test serialization, never deserialize these fixtures.
             for expert in EXPERT_ORDER:
-                path = weights / "finetuned" / f"{expert}_best.pt"
+                path = weights / "finetuned_weights" / f"{expert}_best.pt"
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(expert.encode())
             config_path, train_path, _ = generate_configs(ROOT, dataset_root, weights, root / "cache", output, root / "run", root)

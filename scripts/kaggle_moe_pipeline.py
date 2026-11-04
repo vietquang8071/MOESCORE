@@ -15,6 +15,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 
 import numpy as np
 import torch
@@ -43,7 +44,8 @@ def discover_dataset(input_root, explicit=None):
     return found[0]
 
 
-def generate_configs(project_root, dataset_root, weights_root, cache_dir, feature_store_root, output_dir, config_dir):
+def generate_configs(project_root, dataset_root, weights_root, cache_dir, feature_store_root, output_dir, config_dir,
+                     *, expert_checkpoints=None):
     project, dataset, weights = map(lambda p: Path(p).resolve(), (project_root, dataset_root, weights_root))
     config_dir = Path(config_dir)
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -59,8 +61,18 @@ def generate_configs(project_root, dataset_root, weights_root, cache_dir, featur
         "expert4": {"beats_checkpoint": "pretrained/BEATs_iter3_plus_AS2M.pt", "clap_checkpoint": "pretrained/laion-clap.pt",
                     "finetuned_checkpoint": "finetuned_weights/expert4_best.pt"},
     }
+    if expert_checkpoints is not None:
+        if set(expert_checkpoints) != set(CHECKPOINT_FIELDS):
+            raise ValueError("expert_checkpoints must contain exactly the four registered experts")
+        paths = expert_checkpoints
     for name, fields in paths.items():
-        expert["experts"][name].update({key: str(weights / value) for key, value in fields.items()})
+        if set(fields) != set(CHECKPOINT_FIELDS[name]):
+            raise ValueError(f"Invalid checkpoint fields for {name}: {sorted(fields)}")
+        resolved_paths = {}
+        for key, value in fields.items():
+            path = Path(value)
+            resolved_paths[key] = str((path if path.is_absolute() else weights / path).resolve())
+        expert["experts"][name].update(resolved_paths)
     expert["experts"]["expert4"]["unilm_source_dir"] = str(project / "expert4_finetune/unilm")
     train = yaml.safe_load((project / "configs/moe_cloud.example.yaml").read_text())
     # Explicit finalized user configuration, checked against the current schema.
@@ -113,29 +125,21 @@ def check_dependencies():
 
 
 def check_text_cache(cache_dir, *, allow_download=False):
-    """One explicit hub-cache location, including E3's direct cache_dir API."""
+    """Check native lookup names in a fresh process before offline extraction."""
     cache = str(Path(cache_dir).resolve())
-    os.environ.update(HF_HOME=cache, HF_HUB_CACHE=cache, TRANSFORMERS_CACHE=cache)
+    os.environ.update(HF_HOME=cache, HF_HUB_CACHE=cache, TRANSFORMERS_CACHE=cache,
+                      HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", HF_DATASETS_OFFLINE="1")
+    environment = dict(os.environ)
     if allow_download:
-        os.environ.update(HF_HUB_OFFLINE="0", TRANSFORMERS_OFFLINE="0")
-        from huggingface_hub import snapshot_download
-        for name in ("roberta-base", "google-bert/bert-base-uncased"):
-            snapshot_download(name, cache_dir=cache,
-                              allow_patterns=["*.json", "*.txt", "*.model", "*.safetensors", "pytorch_model.bin"])
-    os.environ.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", HF_DATASETS_OFFLINE="1")
-    from transformers import AutoConfig, AutoTokenizer
-    from huggingface_hub import try_to_load_from_cache
-    for name in ("roberta-base", "google-bert/bert-base-uncased"):
-        try:
-            AutoConfig.from_pretrained(name, cache_dir=cache, local_files_only=True)
-            AutoTokenizer.from_pretrained(name, cache_dir=cache, local_files_only=True)
-            if not any(isinstance(try_to_load_from_cache(name, file, cache_dir=cache), str)
-                       for file in ("model.safetensors", "pytorch_model.bin")):
-                raise FileNotFoundError(f"Missing pretrained text model weights for {name}")
-        except Exception as exc:
-            raise RuntimeError(f"Missing approved tokenizer/model cache {name} in {cache}. "
-                               "Attach a prepared hub cache or explicitly enable ALLOW_CACHE_DOWNLOAD.") from exc
-    return {"status": "PASS", "cache_dir": cache, "offline_extraction": True}
+        environment.update(HF_HUB_OFFLINE="0", TRANSFORMERS_OFFLINE="0")
+    with tempfile.TemporaryDirectory(prefix="moe-text-cache-") as temporary:
+        report_path = Path(temporary) / "report.json"
+        command = [sys.executable, str(Path(__file__).with_name("prepare_moe_text_cache.py")),
+                   "--cache-dir", cache, "--report-json", str(report_path)]
+        if allow_download:
+            command.append("--download")
+        subprocess.run(command, env=environment, check=True)
+        return json.loads(report_path.read_text(encoding="utf-8"))
 
 
 def preflight(config, dataset_root, output_root, *, require_cuda=True, check_cache=True, allow_download=False):

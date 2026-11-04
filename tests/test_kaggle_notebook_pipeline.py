@@ -56,10 +56,10 @@ class NotebookPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             audio_fixture(base / "input/data")
-            for section, names in (("pretrained", ("laion-clap.pt", "mga-clap.pt", "m2d-base.pth", "beats.pt")),
-                                   ("finetuned", tuple(f"expert{i}_best.pt" for i in range(1, 5)))):
+            for section, names in (("pretrained", ("laion-clap.pt", "mga-clap.pt", "checkpoint-30.pth", "BEATs_iter3_plus_AS2M.pt")),
+                                   ("finetuned_weights", tuple(f"expert{i}_best.pt" for i in range(1, 5)))):
                 for name in names:
-                    file = base / "input/moescore-checkpoints" / section / name
+                    file = base / "input/datasets/qnv8071/xacle-weights/weights" / section / name
                     file.parent.mkdir(parents=True, exist_ok=True)
                     file.write_bytes(b"test-only-not-a-checkpoint")
             (base / "working").mkdir()

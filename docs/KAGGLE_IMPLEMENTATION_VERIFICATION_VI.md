@@ -174,3 +174,23 @@ Kiểm thử sau bổ sung:
 - `git diff --check`: **PASS** trước cập nhật tài liệu này.
 
 Regression 275 test ở mục 6 là lần chạy đầy đủ trước phần bổ sung requirements. Sau bổ sung chỉ chạy lại nhóm Kaggle phù hợp, không khẳng định đã chạy lại toàn suite hoặc đã thử cài trong một image Kaggle sạch. Log mới: `/tmp/moescore_kaggle_dependencies_tests.log`, `/tmp/moescore_requirements_dryrun.log`.
+
+## 10. Đồng bộ đường dẫn theo dataset weight thực tế
+
+Người dùng cung cấp danh sách tám file trong `/kaggle/input/datasets/qnv8071/xacle-weights/weights`. Thư mục fine-tuned thực tế là `finetuned_weights/`; checkpoint E3/E4 tương ứng mang tên `pretrained/checkpoint-30.pth` và `pretrained/BEATs_iter3_plus_AS2M.pt`.
+
+Tại thời điểm sửa, commit `5da3bc7` của người dùng đã cập nhật các tên này trong generator, trong khi mapping kiểm tra checkpoint ở notebook còn dùng tên cũ. Đã giữ thay đổi của người dùng, cập nhật root và mapping notebook, đồng thời bổ sung tham số tùy chọn `expert_checkpoints` cho generator để chính mapping người dùng được áp dụng vào cả YAML đã lưu và cấu hình runtime. Không đổi tên hoặc chỉnh nội dung checkpoint.
+
+Đã cập nhật fixture và hướng dẫn theo cấu trúc thực tế, thêm regression test so sánh checkpoint mapping người dùng với YAML/runtime. Kết quả: **12/12 test `test_kaggle*.py` PASS**, thời gian `6.349s`; notebook hợp lệ theo nbformat và mọi code cell compile thành công; `git diff --check` PASS trước cập nhật báo cáo này. Log: `/tmp/moescore_checkpoint_paths_tests.log`. Không có phép thử inference hoặc full Kaggle mới trong phần sửa đường dẫn này.
+
+## 11. Sửa cache BERT của Expert 2
+
+Traceback Kaggle cho thấy factory E2 dừng tại `BertConfig.from_pretrained('bert-base-uncased')` do cache thiếu file trong chế độ offline. Nguồn E2 xác nhận ID tên ngắn này, trong khi preflight cũ chỉ kiểm `roberta-base` và `google-bert/bert-base-uncased`. Vì vậy preflight cũ chưa bảo đảm cache đáp ứng đúng cách lookup của E2.
+
+Đã tạo `scripts/prepare_moe_text_cache.py`, cập nhật `check_text_cache()` gọi tiến trình mới với cache/environment tường minh. Script chuẩn bị và kiểm cả ba ID theo đúng nguồn; E2 chỉ cần config/tokenizer vì trọng số được phục hồi từ MGA. Kiểm E2 dùng đúng `BertConfig` và `BertTokenizer` với lookup mặc định, không đổi kiến trúc hoặc tên model trong source expert. Chuẩn bị online diễn ra riêng, adapter tiếp tục offline.
+
+Thêm bốn test trong `tests/test_kaggle_text_cache.py`: tiến trình/environment riêng, chuẩn bị đúng alias E2 mà không tải trọng số BERT dư, từ chối cache thiếu alias E2 dù ID namespaced có sẵn, và validation offline không bật mạng. Test tiến trình đã được chạy trước sửa và thất bại đúng do helper cũ không tạo tiến trình mới; sau sửa đạt.
+
+Nhóm Kaggle sau sửa: **16/16 PASS**, `5.012s`, log `/tmp/moescore_text_cache_tests.log`. Notebook hợp lệ theo nbformat và compile mọi code cell; compile Python mới/sửa và `git diff --check` PASS trước cập nhật tài liệu này. Chưa chạy lại toàn regression suite trong phần sửa cache.
+
+Đã chạy CLI thật ở chế độ offline trên cache có sẵn `/home/vitquay1708/.cache/huggingface/hub`: cả `roberta-base`, `bert-base-uncased`, `google-bert/bert-base-uncased` đều PASS. E2 xác nhận tokenizer class `BertTokenizer`, model type `bert`. Không tải dữ liệu, không dựng encoder và không giải tuần tự checkpoint expert. Báo cáo `/tmp/moescore_text_cache_offline.json`; log `/tmp/moescore_text_cache_offline.log`. Đây là xác minh cache cục bộ, chưa phải lần chạy lại Expert 2 trong phiên Kaggle của người dùng.

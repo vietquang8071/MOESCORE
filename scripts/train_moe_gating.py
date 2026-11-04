@@ -195,6 +195,8 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
             "validation_metrics_raw": validation["metrics"],
             "learning_rate": trainer.optimizer.param_groups[0]["lr"],
         })
+        print(f"Epoch {epoch + 1}: step={trainer.global_step}, train_loss={history[-1]['train_loss']:.6f}, "
+              f"validation={validation['metrics']}, best_srcc={best_srcc}", file=sys.stderr, flush=True)
         sampler.set_epoch(epoch + 1)
         manager.save(
             latest_path,

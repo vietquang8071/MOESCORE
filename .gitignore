@@ -76,3 +76,4 @@ dist/
 /data/**/*.wav
 /data/**/*.flac
 /data/**/*.mp3
+*.zip

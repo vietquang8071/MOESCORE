@@ -53,7 +53,8 @@ def load_finetuned(checkpoint_path, resources, device):
         if _sha256(resources[name]) != state['fingerprints'][name]:
             raise ValueError(f'Pretrained checkpoint identity differs for {name}')
     if _source_identity(resources['unilm_source_dir']) != state['fingerprints']['unilm_source']:
-        raise ValueError('UniLM BEATs source differs from the saved training run')
+        from .source_compatibility import verify_bundled_import_equivalence
+        verify_bundled_import_equivalence(resources['unilm_source_dir'], state['fingerprints']['unilm_source'])
     model = Expert4.from_pretrained(resources['beats_checkpoint'], resources['clap_checkpoint'], resources['unilm_source_dir'])
     load_trainable_state_dict(model, state['model_state_dict'])
     return model.to(device).eval(), state

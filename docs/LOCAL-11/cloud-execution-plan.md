@@ -1,5 +1,11 @@
 # LOCAL-11 — Kế hoạch thực thi trên Google Colab và Kaggle
 
+> Cập nhật sau LOCAL-11: quy trình Kaggle hiện hành nằm ở
+> [hướng dẫn Kaggle bằng tiếng Việt](../KAGGLE_GATING_GUIDE_VI.md).
+> Đã bổ sung extractor toàn tập theo shard, chốt loss `[1.0, 0.5]`, và xác minh
+> nguồn UniLM đi kèm chỉ khác hai import. Các mô tả thiếu extractor hoặc bắt
+> buộc clone UniLM riêng bên dưới phản ánh trạng thái lịch sử của LOCAL-11.
+
 ## 1. Phạm vi
 
 LOCAL-11 chỉ chạy thử cổng trên bốn đầu ra expert đã xác minh và chạy test phần mềm cục bộ. Không có phiên Colab/Kaggle nào được khởi chạy. Các lệnh dưới đây là giao diện dự kiến cho CLOUD-01 đến CLOUD-04; cần sao chép cấu hình và thay đường dẫn mount theo phiên thực tế.

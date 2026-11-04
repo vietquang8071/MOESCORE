@@ -188,7 +188,7 @@ class MoeGateEvaluator:
             result["regression_loss_normalized"] = regression_total / loss_sample_count
         return result
 
-    def predict(self, batches: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    def predict(self, batches: Iterable[Mapping[str, Any]], *, round_scores: bool = True) -> list[dict[str, Any]]:
         if isinstance(batches, (str, bytes)) or not isinstance(batches, Iterable):
             raise TypeError("inference batches must be iterable")
         self.gating_network.eval()
@@ -213,7 +213,7 @@ class MoeGateEvaluator:
                     rows.append({
                         "sample_id": sample_id,
                         "wave_file_name": filename,
-                        "pred_score": round(float(score), 2),
+                        "pred_score": round(float(score), 2) if round_scores else float(score),
                     })
         if batch_count == 0:
             raise ValueError("inference requires at least one batch")

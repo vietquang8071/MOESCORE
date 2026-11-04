@@ -20,8 +20,7 @@ training:
   early_stop_patience: 50
   checkpoint_interval_steps: 1000
   loss:
-    # LOCAL-11 brief requests the negative contrastive coefficient. The
-    # tracked configs/config.yaml currently says +0.5; see the report.
+    # Finalized objective: ClippedMSE + 0.5 * Contrastive + 0.2 * Diversity.
     loss_weights: [1.0, 0.5]
     clipped_mse:
       tau: 0.25

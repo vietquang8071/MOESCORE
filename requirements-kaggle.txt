@@ -1,0 +1,20 @@
+# Kaggle runtime dependencies for the four verified experts and gating pipeline.
+# Keep the preinstalled torch/torchaudio/torchvision/CUDA stack. Use the notebook
+# installer, which constrains those distributions to their installed versions.
+# Core model/audio versions below match the locally verified environment;
+# a complete clean Kaggle installation still requires its real smoke test.
+numpy==1.26.4
+scipy==1.15.3
+SoundFile==0.14.0
+pandas>=2.2,<3
+PyYAML>=6,<7
+laion-clap==1.1.7
+torchlibrosa==0.1.0
+nnAudio==0.3.4
+timm==1.0.28
+transformers==5.17.0
+huggingface-hub==1.32.0
+librosa==0.11.0
+einops>=0.8,<1
+tqdm>=4.67,<5
+matplotlib>=3.8,<4

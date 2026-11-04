@@ -53,11 +53,11 @@ def generate_configs(project_root, dataset_root, weights_root, cache_dir, featur
     expert["data"] = {"train_csv": "meta_data/train_average.csv", "validation_csv": "meta_data/validation_average.csv",
                       "test_csv": "meta_data/test_average.csv", "audio_root": "wav"}
     paths = {
-        "expert1": {"pretrained_checkpoint": "pretrained/laion-clap.pt", "finetuned_checkpoint": "finetuned/expert1_best.pt"},
-        "expert2": {"pretrained_checkpoint": "pretrained/mga-clap.pt", "finetuned_checkpoint": "finetuned/expert2_best.pt"},
-        "expert3": {"base_checkpoint": "pretrained/m2d-base.pth", "finetuned_checkpoint": "finetuned/expert3_best.pt"},
-        "expert4": {"beats_checkpoint": "pretrained/beats.pt", "clap_checkpoint": "pretrained/laion-clap.pt",
-                    "finetuned_checkpoint": "finetuned/expert4_best.pt"},
+        "expert1": {"pretrained_checkpoint": "pretrained/laion-clap.pt", "finetuned_checkpoint": "finetuned_weights/expert1_best.pt"},
+        "expert2": {"pretrained_checkpoint": "pretrained/mga-clap.pt", "finetuned_checkpoint": "finetuned_weights/expert2_best.pt"},
+        "expert3": {"base_checkpoint": "pretrained/checkpoint-30.pth", "finetuned_checkpoint": "finetuned_weights/expert3_best.pt"},
+        "expert4": {"beats_checkpoint": "pretrained/BEATs_iter3_plus_AS2M.pt", "clap_checkpoint": "pretrained/laion-clap.pt",
+                    "finetuned_checkpoint": "finetuned_weights/expert4_best.pt"},
     }
     for name, fields in paths.items():
         expert["experts"][name].update({key: str(weights / value) for key, value in fields.items()})

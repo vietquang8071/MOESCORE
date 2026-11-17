@@ -523,7 +523,7 @@ def prepare_expert_inputs(dataset, expert, records, *, start, device):
     return inputs
 
 
-def prepare_job(config_path, dataset_root, output_root, *, batch_sizes=None, shard_size=128, limit=None, device=None, profile="top1_4"):
+def prepare_job(config_path, dataset_root, output_root, *, batch_sizes=None, shard_size=128, limit=None, device=None, profile="top1_4", worker_devices=None):
     if shard_size <= 0 or (limit is not None and not 1 <= limit <= 4):
         raise ValueError("shard_size must be positive; smoke limit must be 1..4")
     config = resolve_moe_paths(load_moe_config(config_path), config_path)
@@ -533,6 +533,10 @@ def prepare_job(config_path, dataset_root, output_root, *, batch_sizes=None, sha
     selected_device = str(device if device is not None else config["runtime"]["device"])
     if selected_device == "auto":
         selected_device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    if worker_devices is None:
+        worker_devices = {expert: selected_device for expert in expert_order}
+    if set(worker_devices) != set(expert_order) or any(not isinstance(value, str) for value in worker_devices.values()):
+        raise ValueError("worker_devices must assign one device to every selected expert")
     output = Path(output_root).resolve()
     cache_root = output / "feature_cache"
     work = cache_root / "projections"
@@ -562,7 +566,7 @@ def prepare_job(config_path, dataset_root, output_root, *, batch_sizes=None, sha
         manifests[split] = manifest
         print(f"{split}: {len(records)} pairs; columns={headers}; labels_consumed={split != 'test'}", flush=True)
     expert_identities = {
-        expert: compute_expert_cache_identity(expert, config, device=selected_device)
+        expert: compute_expert_cache_identity(expert, config, device=worker_devices[expert])
         for expert in expert_order
     }
     assembly_identities = {}
@@ -579,6 +583,7 @@ def prepare_job(config_path, dataset_root, output_root, *, batch_sizes=None, sha
         "expert_profile": profile,
         "expert_order": list(expert_order),
         "inference_device": selected_device,
+        "worker_devices": worker_devices,
         "checkpoint_provenance": provenance,
         "expert_cache_identities": expert_identities,
         "feature_dimensions": feature_dimensions,
@@ -673,16 +678,21 @@ def validate_manifests(job, manifests):
             raise ValueError("Duplicate or mixed-split extraction sample identities")
 
 
+def validate_worker_device(job, expert, device):
+    if expert not in job["expert_order"]:
+        raise ValueError(f"Expert {expert!r} is outside the requested profile")
+    assigned = job.get("worker_devices", {}).get(expert, job.get("inference_device"))
+    if str(device) != assigned:
+        raise ValueError(f"Worker device {device!r} differs from assigned device {assigned!r} for {expert}")
+    identity_device = job["expert_cache_identities"][expert]["inference_policy"]["device"]["requested_device"] if "expert_cache_identities" in job else assigned
+    if identity_device != assigned:
+        raise ValueError(f"Prepared cache identity device {identity_device!r} differs from assigned device {assigned!r}")
+
+
 def extract_worker(config, job, manifests, dataset_root, output_root, expert, device):
     from scripts.verify_real_expert_to_gate import memory_snapshot, _validate_real_module_origins
     validate_manifests(job, manifests)
-    if expert not in job["expert_order"]:
-        raise ValueError(f"Expert {expert!r} is outside the requested profile")
-    if str(device) != job.get("inference_device"):
-        raise ValueError(
-            f"Worker device {device!r} differs from prepared cache inference device "
-            f"{job.get('inference_device')!r}; prepare a matching assembly job"
-        )
+    validate_worker_device(job, expert, device)
     identity = job_identity(job)
     expert_identity = job["expert_cache_identities"][expert]
     cache_id = expert_identity["cache_id"]
@@ -722,6 +732,9 @@ def extract_worker(config, job, manifests, dataset_root, output_root, expert, de
             "assembly_job_identity": identity,
             "factory_restoration": "PASS_FROM_EXISTING_SOURCE_FACTORY",
             "frozen_eval": True,
+            "device": str(device),
+            "batch_size": job["batch_sizes"][expert],
+            "sample_count_by_split": {split: len(manifest["records"]) for split, manifest in manifests.items()},
             "reused_validated_shards": True,
             "validated_shards": reused_shards,
             "model_constructed": False,
@@ -766,7 +779,7 @@ def extract_worker(config, job, manifests, dataset_root, output_root, expert, de
     _atomic_json(report_path, report)
     datasets = {}
     for split in manifests:
-        dataset, _ = projected_dataset(dataset_root, split, Path(output_root) / "feature_cache" / "projections",
+        dataset, _ = projected_dataset(dataset_root, split, Path(output_root) / "feature_cache" / "projections" / expert,
                                        limit=len(manifests[split]["records"]) if job["smoke"] else None)
         # Eval-style center crop for E1; row IDs keep their original split.
         dataset.split = "validation"

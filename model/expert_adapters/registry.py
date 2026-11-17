@@ -42,6 +42,7 @@ class ExpertInputContract:
     caption_policy: str = "strip"
     lengths_key: Optional[str] = None
     lengths_dtype: Optional[str] = None
+    requires_wav_paths: bool = False
 
 
 EXPERT_INPUT_CONTRACTS = MappingProxyType(
@@ -73,6 +74,20 @@ EXPERT_INPUT_CONTRACTS = MappingProxyType(
             lengths_key="expert4_wav_lens",
             lengths_dtype="torch.int64",
         ),
+    }
+)
+
+# Future pretrained experts can request original files without changing the
+# four-expert gate or forcing unrelated adapters to receive filesystem paths.
+TOP2_EXPERT_INPUT_CONTRACTS = MappingProxyType(
+    {
+        "top2_msclap": ExpertInputContract(
+            audio_key="expert2_wavs",
+            audio_shape=(None, 1, 320_000),
+            sample_rate_hz=32_000,
+            max_samples=320_000,
+            requires_wav_paths=True,
+        )
     }
 )
 

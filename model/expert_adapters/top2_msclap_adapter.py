@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
+import math
 import os
 from pathlib import Path
 from typing import Any, Optional
@@ -27,6 +28,60 @@ from model.expert_adapters.top2_common import (
 _AUDIO_SAMPLES = 320_000
 _SPLITS = frozenset({"train", "validation", "test"})
 _ADAPTER_NAME = "Top2MSCLAPAdapter"
+_MSCLAP_2023_RATE_HZ = 44_100
+_MSCLAP_2023_DURATION_SECONDS = 7
+
+
+def _center_crop_or_repeat(audio_time_series: Any, sample_rate: int, audio_duration: float) -> torch.Tensor:
+    """Apply MS-CLAP's original repeat/truncate policy and deterministic center crop.
+
+    WAV decoding, optional resampling, flattening and channel handling remain
+    owned by the installed MS-CLAP ``read_audio`` implementation.
+    """
+    if isinstance(sample_rate, bool) or not isinstance(sample_rate, int) or sample_rate <= 0:
+        raise ValueError(f"{_ADAPTER_NAME} received an invalid decoded sample rate: {sample_rate!r}")
+    if isinstance(audio_duration, bool) or not isinstance(audio_duration, (int, float)):
+        raise ValueError(f"{_ADAPTER_NAME} received an invalid configured duration: {audio_duration!r}")
+    if not math.isfinite(float(audio_duration)) or audio_duration <= 0:
+        raise ValueError(f"{_ADAPTER_NAME} audio duration must be positive and finite")
+    audio = torch.as_tensor(audio_time_series).reshape(-1)
+    if audio.numel() == 0:
+        raise ValueError(f"{_ADAPTER_NAME} cannot preprocess an empty or unreadable waveform")
+    target_samples = int(float(audio_duration) * sample_rate)
+    if target_samples <= 0:
+        raise ValueError(f"{_ADAPTER_NAME} configured duration produces an empty target waveform")
+    if target_samples >= audio.numel():
+        repeat_factor = math.ceil(target_samples / audio.numel())
+        audio = audio.repeat(repeat_factor)[:target_samples]
+    else:
+        start = (audio.numel() - target_samples) // 2
+        audio = audio[start : start + target_samples]
+    # This matches upstream load_audio_into_tensor's torch.FloatTensor output.
+    return audio.to(device="cpu", dtype=torch.float32).contiguous()
+
+
+def _deterministic_load_audio_into_tensor(
+    self: Any, audio_path: str, audio_duration: float, resample: bool = False
+) -> torch.Tensor:
+    """Override only the random segment-selection stage of MS-CLAP loading."""
+    try:
+        waveform, sample_rate = self.read_audio(audio_path, resample=resample)
+    except Exception as exc:
+        raise RuntimeError(f"{_ADAPTER_NAME} failed to read WAV {audio_path!r}: {exc}") from exc
+    return _center_crop_or_repeat(waveform, sample_rate, audio_duration)
+
+
+def _deterministic_clap_class(clap_class: type) -> type:
+    """Create an adapter-owned subclass; never mutate the installed package."""
+    if not isinstance(clap_class, type):
+        raise TypeError(f"{_ADAPTER_NAME} expected the installed CLAP class, got {clap_class!r}")
+
+    class DeterministicCenterCropCLAP(clap_class):
+        load_audio_into_tensor = _deterministic_load_audio_into_tensor
+
+    DeterministicCenterCropCLAP.__name__ = "DeterministicCenterCropCLAP"
+    DeterministicCenterCropCLAP.__qualname__ = "DeterministicCenterCropCLAP"
+    return DeterministicCenterCropCLAP
 
 
 def _dimension_from_api(api: Any, explicit: Optional[int]) -> int:
@@ -116,11 +171,26 @@ class Top2MSCLAPAdapter(ExpertAdapter):
             with huggingface_environment(offline=offline, cache_dir=cache_dir), selected_cuda:
                 from msclap import CLAP
 
-                clap_api = CLAP(
+                deterministic_clap = _deterministic_clap_class(CLAP)
+                clap_api = deterministic_clap(
                     model_fp=str(checkpoint),
                     version="2023",
                     use_cuda=selected_device.type == "cuda",
                 )
+                args = getattr(clap_api, "args", None)
+                configured_rate = getattr(args, "sampling_rate", None)
+                configured_duration = getattr(args, "duration", None)
+                if configured_rate != _MSCLAP_2023_RATE_HZ or configured_duration != _MSCLAP_2023_DURATION_SECONDS:
+                    raise ValueError(
+                        "MS-CLAP 2023 preprocessing configuration differs from the verified "
+                        f"44.1 kHz/7 s policy: rate={configured_rate!r}, duration={configured_duration!r}"
+                    )
+                clap_api.moescore_audio_policy = {
+                    "audio_crop_policy": "center",
+                    "audio_duration_seconds": configured_duration,
+                    "sample_rate_hz": configured_rate,
+                    "short_audio_policy": "repeat_then_truncate",
+                }
             clap_api.clap.to(selected_device)
         except ImportError as exc:
             raise RuntimeError(

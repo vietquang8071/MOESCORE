@@ -281,11 +281,15 @@ class Top2AdapterSmokeTests(unittest.TestCase):
             checkpoint.write_bytes(b"checkpoint")
             calls = []
 
-            def clap_factory(**kwargs):
-                calls.append(kwargs)
-                return TinyMSCLAP()
+            class ClapFactory(TinyMSCLAP):
+                def __init__(self, **kwargs):
+                    calls.append(kwargs)
+                    super().__init__()
+                    self.args = SimpleNamespace(
+                        d_proj=4, sampling_rate=44_100, duration=7
+                    )
 
-            with patch.dict("sys.modules", {"msclap": SimpleNamespace(CLAP=clap_factory)}):
+            with patch.dict("sys.modules", {"msclap": SimpleNamespace(CLAP=ClapFactory)}):
                 adapter = module.Top2MSCLAPAdapter.from_config(
                     {"checkpoint": str(checkpoint), "runtime": {"device": "cpu"}}
                 )

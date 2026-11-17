@@ -15,9 +15,10 @@ from expert4_finetune.source_compatibility import (
 )
 from model.expert_adapters.registry import EXPERT_ORDER, EXPERT_FEATURE_DIMS
 from data.moe_feature_store import validate_feature_store
+from data.moe_expert_cache import build_sample_identity
 from scripts.extract_moe_feature_store import (
     prepare_job, extract_worker, assemble_stores, load_chunk, chunk_path,
-    job_identity, completed_stores_match, projected_dataset, validate_manifests,
+    job_identity, assembly_store_root, completed_stores_match, projected_dataset, validate_manifests,
 )
 from scripts.kaggle_moe_pipeline import generate_configs, discover_dataset
 
@@ -93,6 +94,12 @@ class ExtractionTests(unittest.TestCase):
             root = Path(tmp)
             dataset_root, weights, output = root / "data", root / "weights", root / "store"
             audio_fixture(dataset_root)
+            legacy_shard = output / "_extraction" / "expert1" / "train" / "shard_000000.npz"
+            legacy_shard.parent.mkdir(parents=True)
+            legacy_shard.write_bytes(b"legacy global-identity shard")
+            legacy_store_marker = output / "train" / "legacy_store.marker"
+            legacy_store_marker.parent.mkdir(parents=True)
+            legacy_store_marker.write_bytes(b"legacy four-expert store")
             for name in ("laion-clap.pt", "mga-clap.pt", "checkpoint-30.pth", "BEATs_iter3_plus_AS2M.pt"):
                 path = weights / "pretrained" / name
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -102,7 +109,9 @@ class ExtractionTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(expert.encode())
             config_path, train_path, _ = generate_configs(ROOT, dataset_root, weights, root / "cache", output, root / "run", root)
-            config, job, manifests = prepare_job(config_path, dataset_root, output, shard_size=1, limit=2)
+            config, job, manifests = prepare_job(
+                config_path, dataset_root, output, shard_size=1, limit=2, device="cpu"
+            )
             training = __import__("yaml").safe_load(train_path.read_text())
             self.assertEqual(training["training"]["loss"]["loss_weights"], [1.0, 0.5])
             changed = json.loads(json.dumps(manifests))
@@ -140,12 +149,35 @@ class ExtractionTests(unittest.TestCase):
                         raise RuntimeError("simulated session interruption")
                     return super().forward(batch)
 
+            def shard_identity(selected_expert, split, selected_records):
+                source = job["expert_cache_identities"][selected_expert]
+                return build_sample_identity(
+                    split,
+                    selected_records,
+                    {
+                        "expert_cache_id": source["cache_id"],
+                        "input_contract": source["input_contract"],
+                        "preprocessing_provenance": source["preprocessing_provenance"],
+                    },
+                    job["feature_dimensions"][selected_expert],
+                )
+
+            def path_for(selected_expert, split, index, start, selected_records):
+                sample = shard_identity(selected_expert, split, selected_records)
+                return chunk_path(
+                    output, selected_expert, split, index,
+                    cache_id=job["expert_cache_identities"][selected_expert]["cache_id"],
+                    sample_identity_sha256=sample["sample_identity_sha256"],
+                ), sample
+
             with patch("scripts.extract_moe_feature_store.create_expert_adapter", side_effect=[InterruptedStub("expert1"), *[Stub(e) for e in EXPERT_ORDER]]) as factory, \
                  patch("scripts.verify_real_expert_to_gate._validate_real_module_origins", return_value={}):
                 with self.assertRaisesRegex(RuntimeError, "session interruption"):
                     extract_worker(config, job, manifests, dataset_root, output, "expert1", "cpu")
-                self.assertTrue(chunk_path(output, "expert1", "train", 0).exists())
-                self.assertFalse(chunk_path(output, "expert1", "train", 1).exists())
+                first_path, first_sample = path_for("expert1", "train", 0, 0, manifests["train"]["records"][:1])
+                second_path, _ = path_for("expert1", "train", 1, 1, manifests["train"]["records"][1:2])
+                self.assertTrue(first_path.exists())
+                self.assertFalse(second_path.exists())
                 for expert in EXPERT_ORDER:
                     extract_worker(config, job, manifests, dataset_root, output, expert, "cpu")
                 self.assertEqual(factory.call_count, 5)
@@ -153,18 +185,33 @@ class ExtractionTests(unittest.TestCase):
                 self.assertEqual(factory.call_count, 5)  # Valid shards skip model construction.
             assemble_stores(job, manifests, output)
             self.assertTrue(completed_stores_match(job, manifests, output))
-            self.assertFalse(validate_feature_store(output, split="test")["labels_present"])
-            self.assertTrue(validate_feature_store(output, split="train")["labels_present"])
-            _, resized_job, _ = prepare_job(config_path, dataset_root, output, shard_size=1, limit=2,
-                                            batch_sizes=dict.fromkeys(EXPERT_ORDER, 2))
+            self.assertEqual(legacy_shard.read_bytes(), b"legacy global-identity shard")
+            self.assertEqual(legacy_store_marker.read_bytes(), b"legacy four-expert store")
+            final_store = assembly_store_root(output, job)
+            self.assertFalse(validate_feature_store(final_store, split="test")["labels_present"])
+            self.assertTrue(validate_feature_store(final_store, split="train")["labels_present"])
+            _, resized_job, _ = prepare_job(
+                config_path, dataset_root, output, shard_size=1, limit=2,
+                batch_sizes=dict.fromkeys(EXPERT_ORDER, 2), device="cpu",
+            )
             self.assertEqual(job_identity(job), job_identity(resized_job))
-            path = chunk_path(output, "expert1", "train", 0)
+            path, sample = path_for("expert1", "train", 0, 0, manifests["train"]["records"][:1])
             path.write_bytes(b"corrupt")
-            with self.assertRaisesRegex(ValueError, "Corrupt"):
-                load_chunk(path, expert="expert1", records=manifests["train"]["records"][:1], identity=job_identity(job))
+            with self.assertRaisesRegex(ValueError, "hash|corrupt"):
+                load_chunk(path, expert="expert1", records=manifests["train"]["records"][:1],
+                           identity=job["expert_cache_identities"]["expert1"], sample_identity=sample)
             (weights / "pretrained/laion-clap.pt").write_bytes(b"different checkpoint")
-            with self.assertRaisesRegex(ValueError, "provenance changed"):
-                prepare_job(config_path, dataset_root, output, shard_size=1, limit=2)
+            _, changed_job, _ = prepare_job(
+                config_path, dataset_root, output, shard_size=1, limit=2, device="cpu"
+            )
+            self.assertNotEqual(
+                job["expert_cache_identities"]["expert1"]["cache_id"],
+                changed_job["expert_cache_identities"]["expert1"]["cache_id"],
+            )
+            self.assertEqual(
+                job["expert_cache_identities"]["expert2"]["cache_id"],
+                changed_job["expert_cache_identities"]["expert2"]["cache_id"],
+            )
 
 
 if __name__ == "__main__":

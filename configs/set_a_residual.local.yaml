@@ -1,0 +1,30 @@
+# Local reference configuration. No full9 E5 cache existed at implementation
+# time; replace feature_store_root with its generated output before training.
+feature_store_root: /tmp/moe27-e5/full9_feature_store
+output_dir: /tmp/moe27-e5/runs
+source_manifest_paths: {}
+
+component_resources:
+  m2d_checkpoint: /home/vitquay1708/Working_Space/Research/2027/code/MOESCORE/weights/pretrained/checkpoint-30.pth
+  msclap_checkpoint: /home/vitquay1708/Working_Space/Research/2027/code/MOESCORE/weights/pretrained/CLAP_weights_2023.pth
+  mga_checkpoint: /home/vitquay1708/Working_Space/Research/2027/code/MOESCORE/weights/pretrained/mga-clap.pt
+  mga_source_dir: /home/vitquay1708/Working_Space/Research/2027/code/MOESCORE-E5/expert2_finetune/MGA-CLAP
+  mga_architecture_yaml: /home/vitquay1708/Working_Space/Research/2027/code/MOESCORE-E5/expert2_finetune/MGA-CLAP/settings/inference_example.yaml
+
+runtime:
+  device: cpu
+
+model:
+  hidden_dims: [256, 64]
+  dropout: 0.2
+
+training:
+  epochs: 20
+  batch_size: 8
+  num_workers: 0
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  gradient_clip: 1.0
+  seed: 42
+
+resume_from: null

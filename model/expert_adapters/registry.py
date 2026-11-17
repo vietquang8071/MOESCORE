@@ -1,4 +1,4 @@
-"""Lazy registry and output-contract helpers for the four MOESCORE experts.
+"""Lazy profile registry and output contracts for MOESCORE experts.
 
 This module does not construct models or load checkpoints. Factory lookup
 imports only the requested lightweight adapter module; its ``from_config``
@@ -28,8 +28,7 @@ EXPERT_FEATURE_DIMS = MappingProxyType(
 )
 EXPECTED_FEATURE_WIDTH = sum(EXPERT_FEATURE_DIMS.values())
 
-# Metadata for the later nine-expert profile. The active registry/gate remain
-# four-expert until that integration milestone is implemented.
+# The legacy profile remains the default while full_9 is explicit.
 FULL9_EXPERT_ORDER = (
     "expert1",
     "expert2",
@@ -55,6 +54,15 @@ EXPERT_FEATURE_DIMS_FULL9 = MappingProxyType(
     }
 )
 EXPECTED_FULL9_FEATURE_WIDTH = sum(EXPERT_FEATURE_DIMS_FULL9.values())
+EXPERT_PROFILES = MappingProxyType({"top1_4": EXPERT_ORDER, "full_9": FULL9_EXPERT_ORDER})
+
+
+def profile_contract(profile: str = "top1_4") -> tuple[tuple[str, ...], dict[str, int], int]:
+    if profile not in EXPERT_PROFILES:
+        raise ValueError(f"Unknown expert profile {profile!r}")
+    order = EXPERT_PROFILES[profile]
+    dimensions = {name: EXPERT_FEATURE_DIMS_FULL9[name] for name in order}
+    return order, dimensions, sum(dimensions.values())
 
 
 @dataclass(frozen=True)
@@ -105,8 +113,8 @@ EXPERT_INPUT_CONTRACTS = MappingProxyType(
     }
 )
 
-# Future pretrained experts can request original files without changing the
-# four-expert gate or forcing unrelated adapters to receive filesystem paths.
+# Pretrained experts can request original files without forcing unrelated
+# adapters to receive filesystem paths.
 TOP2_EXPERT_INPUT_CONTRACTS = MappingProxyType(
     {
         "top2_laion": ExpertInputContract(
@@ -121,9 +129,13 @@ TOP2_EXPERT_INPUT_CONTRACTS = MappingProxyType(
             sample_rate_hz=32_000,
             max_samples=320_000,
             requires_wav_paths=True,
-        )
+        ),
+        "top2_m2d": EXPERT_INPUT_CONTRACTS["expert3"],
+        "top2_mga": EXPERT_INPUT_CONTRACTS["expert2"],
+        "m2d_lora": EXPERT_INPUT_CONTRACTS["expert3"],
     }
 )
+ALL_EXPERT_INPUT_CONTRACTS = MappingProxyType({**EXPERT_INPUT_CONTRACTS, **TOP2_EXPERT_INPUT_CONTRACTS})
 
 
 @dataclass(frozen=True)
@@ -147,6 +159,11 @@ EXPERT_REGISTRY = MappingProxyType(
         "expert4": ExpertRegistration(
             "model.expert_adapters.expert4_adapter", "Expert4Adapter", 1024
         ),
+        "top2_m2d": ExpertRegistration("model.expert_adapters.top2_m2d_adapter", "Top2M2DAdapter", 3840),
+        "top2_msclap": ExpertRegistration("model.expert_adapters.top2_msclap_adapter", "Top2MSCLAPAdapter", 5120),
+        "top2_laion": ExpertRegistration("model.expert_adapters.top2_laion_adapter", "Top2LAIONAdapter", 2560),
+        "top2_mga": ExpertRegistration("model.expert_adapters.top2_mga_adapter", "Top2MGAAdapter", 5120),
+        "m2d_lora": ExpertRegistration("model.expert_adapters.m2d_lora_adapter", "M2DLoRAAdapter", 3073),
     }
 )
 
@@ -156,7 +173,7 @@ def _registration(expert_name: str) -> ExpertRegistration:
         return EXPERT_REGISTRY[expert_name]
     except (KeyError, TypeError) as exc:
         raise KeyError(
-            f"Unknown expert {expert_name!r}; expected one of {EXPERT_ORDER}"
+            f"Unknown expert {expert_name!r}; expected one of {tuple(EXPERT_REGISTRY)}"
         ) from exc
 
 
@@ -284,24 +301,26 @@ def validate_and_assemble_expert_outputs(
     *,
     batch_size: Optional[int] = None,
     feature_dims: Optional[Mapping[str, int]] = None,
+    profile: str = "top1_4",
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Validate four adapter output pairs and concatenate in ``EXPERT_ORDER``.
+    """Validate one profile's adapter outputs and concatenate in its fixed order.
 
     This function only checks and concatenates outputs. It does not score,
     average, normalize, vote, or apply gating weights.
     """
     if not isinstance(expert_outputs, Mapping):
         raise TypeError("expert_outputs must be a mapping keyed by expert name")
-    actual_names, expected_names = set(expert_outputs), set(EXPERT_ORDER)
+    order, registered_dimensions, _ = profile_contract(profile)
+    actual_names, expected_names = set(expert_outputs), set(order)
     missing, unexpected = expected_names - actual_names, actual_names - expected_names
     if missing or unexpected:
         raise ValueError(
             f"Expert output registry mismatch: missing={sorted(missing)}, "
             f"unexpected={sorted(unexpected)}"
         )
-    dimensions = EXPERT_FEATURE_DIMS if feature_dims is None else feature_dims
-    if not isinstance(dimensions, Mapping) or set(dimensions) != expected_names:
-        raise ValueError(f"feature_dims must contain exactly {EXPERT_ORDER}")
+    dimensions = registered_dimensions if feature_dims is None else feature_dims
+    if not isinstance(dimensions, Mapping) or dict(dimensions) != registered_dimensions:
+        raise ValueError(f"feature_dims must match registered profile {profile}")
     if batch_size is not None and (type(batch_size) is not int or batch_size <= 0):
         raise ValueError(f"batch_size must be a positive integer or None; got {batch_size!r}")
 
@@ -315,7 +334,7 @@ def validate_and_assemble_expert_outputs(
     # values. Besides producing a clearer integration error, this avoids
     # invoking value operations on a tensor from a different device when the
     # placement contract is already violated.
-    for name in EXPERT_ORDER:
+    for name in order:
         pair = expert_outputs[name]
         if not isinstance(pair, tuple) or len(pair) != 2:
             raise TypeError(f"{name} output must be a (score, features) tuple")
@@ -341,7 +360,7 @@ def validate_and_assemble_expert_outputs(
 
     expected_device = None
     expected_dtype = None
-    for name in EXPERT_ORDER:
+    for name in order:
         pair = expert_outputs[name]
         if not isinstance(pair, tuple) or len(pair) != 2:
             raise TypeError(f"{name} output must be a (score, features) tuple")
@@ -375,6 +394,8 @@ def validate_and_assemble_expert_outputs(
 __all__ = [
     "EXPERT_FEATURE_DIMS",
     "EXPERT_FEATURE_DIMS_FULL9",
+    "ALL_EXPERT_INPUT_CONTRACTS",
+    "EXPERT_PROFILES",
     "EXPERT_INPUT_CONTRACTS",
     "EXPERT_ORDER",
     "EXPERT_REGISTRY",
@@ -386,5 +407,6 @@ __all__ = [
     "create_expert_adapter",
     "resolve_expert_adapter_class",
     "validate_and_assemble_expert_outputs",
+    "profile_contract",
     "validate_module_origins",
 ]

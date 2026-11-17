@@ -21,16 +21,23 @@ TEXT_CACHE_RESOURCES = (
 )
 
 
-def prepare_text_cache(cache_dir, *, allow_download=False):
-    cache = str(Path(cache_dir).resolve())
+def prepare_text_cache(cache_dir, *, allow_download=False, profile="top1_4"):
+    if profile not in {"top1_4", "full_9"}:
+        raise ValueError("unknown expert profile")
+    home = Path(cache_dir).expanduser().resolve()
+    if home.name == "hub":
+        home = home.parent
+    hub = home / "hub"
+    cache = str(hub)
     offline = "0" if allow_download else "1"
-    os.environ.update(HF_HOME=cache, HF_HUB_CACHE=cache, TRANSFORMERS_CACHE=cache,
+    os.environ.update(HF_HOME=str(home), HF_HUB_CACHE=cache, TRANSFORMERS_CACHE=cache,
                       HF_HUB_OFFLINE=offline, TRANSFORMERS_OFFLINE=offline, HF_DATASETS_OFFLINE="1")
     from huggingface_hub import snapshot_download, try_to_load_from_cache
     from transformers import AutoConfig, AutoTokenizer, BertConfig, BertTokenizer
 
     checked = []
-    for model_id, needs_weights in TEXT_CACHE_RESOURCES:
+    resources = TEXT_CACHE_RESOURCES + (("gpt2", True),) if profile == "full_9" else TEXT_CACHE_RESOURCES
+    for model_id, needs_weights in resources:
         try:
             if allow_download:
                 patterns = ["*.json", "*.txt", "*.model"]
@@ -62,9 +69,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cache-dir", required=True)
     parser.add_argument("--download", action="store_true")
+    parser.add_argument("--profile", choices=("top1_4", "full_9"), default="top1_4")
     parser.add_argument("--report-json")
     args = parser.parse_args(argv)
-    report = prepare_text_cache(args.cache_dir, allow_download=args.download)
+    report = prepare_text_cache(args.cache_dir, allow_download=args.download, profile=args.profile)
     if args.report_json:
         target = Path(args.report_json)
         target.parent.mkdir(parents=True, exist_ok=True)

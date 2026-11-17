@@ -8,6 +8,7 @@ verification shards; final stores use MoeFeatureStoreWriter unchanged.
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 from dataclasses import asdict
 import hashlib
@@ -18,6 +19,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 import numpy as np
 import torch
@@ -43,10 +45,12 @@ from model.expert_adapters.registry import (
     EXPERT_ORDER, EXPERT_FEATURE_DIMS, EXPERT_INPUT_CONTRACTS,
     EXPERT_FEATURE_DIMS_FULL9, TOP2_EXPERT_INPUT_CONTRACTS, create_expert_adapter,
     validate_and_assemble_expert_outputs,
+    EXPERT_PROFILES, profile_contract,
+    ALL_EXPERT_INPUT_CONTRACTS,
 )
 
 EXPECTED_COUNTS = {"train": 7500, "validation": 3000, "test": 3000}
-_TEXT_SNAPSHOT_CACHE = {}
+_TEXT_SNAPSHOT_CACHE = {}  # Compatibility hook; snapshots are re-hashed on every evaluation.
 _PAIRED_CROSS_EXPERTS = frozenset(
     {"expert1", "expert2", "top2_m2d", "top2_msclap", "top2_laion", "top2_mga"}
 )
@@ -66,6 +70,13 @@ CHECKPOINT_FIELDS = {
     "expert2": ("pretrained_checkpoint", "finetuned_checkpoint"),
     "expert3": ("base_checkpoint", "finetuned_checkpoint"),
     "expert4": ("beats_checkpoint", "clap_checkpoint", "finetuned_checkpoint"),
+}
+FULL9_CHECKPOINT_FIELDS = {**CHECKPOINT_FIELDS,
+    "top2_m2d": ("checkpoint",),
+    "top2_msclap": ("checkpoint",),
+    "top2_laion": ("checkpoint",),
+    "top2_mga": ("pretrained_checkpoint",),
+    "m2d_lora": ("base_checkpoint", "finetuned_checkpoint"),
 }
 
 
@@ -172,8 +183,8 @@ def _text_snapshot_identity(model_id, runtime, snapshot_cache):
             if root not in cache_roots:
                 cache_roots.append(root)
     cache_key = (model_id, tuple(str(root.resolve(strict=False)) for root in cache_roots))
-    if cache_key in snapshot_cache:
-        return snapshot_cache[cache_key]
+    # Re-read snapshot contents even when a previous identity is present. A
+    # mutable process-global cache must never hide changed model/tokenizer files.
     model_dir_name = "models--" + model_id.replace("/", "--")
     cache_views = []
     found_snapshots = False
@@ -211,13 +222,11 @@ def compute_expert_cache_identity(expert, config, *, contract=None, feature_dim=
         raise ValueError(f"Configuration has no resources for expert {expert!r}")
     section = config["experts"][expert]
     if contract is None:
-        contract = EXPERT_INPUT_CONTRACTS.get(expert) or TOP2_EXPERT_INPUT_CONTRACTS.get(expert)
+        contract = ALL_EXPERT_INPUT_CONTRACTS.get(expert)
     if contract is None:
         raise ValueError(f"No effective input contract is defined for {expert!r}")
     if feature_dim is None:
-        feature_dim = EXPERT_FEATURE_DIMS.get(expert)
-        if feature_dim is None:
-            feature_dim = EXPERT_FEATURE_DIMS_FULL9.get(expert)
+        feature_dim = EXPERT_FEATURE_DIMS_FULL9.get(expert)
     if type(feature_dim) is not int or feature_dim <= 0:
         raise ValueError(f"A verified feature_dim is required to identify {expert!r}")
     selected_device = str(device if device is not None else config.get("runtime", {}).get("device", "auto"))
@@ -263,11 +272,8 @@ def compute_expert_cache_identity(expert, config, *, contract=None, feature_dim=
     extra_implementation = {}
     if expert.startswith("top2_") or expert == "m2d_lora":
         implementation_files.add(PROJECT_ROOT / "model/expert_adapters/top2_common.py")
-    batch_helper = globals().get("prepare_expert_inputs")
-    if batch_helper is not None:
-        extra_implementation["scripts/extract_moe_feature_store.py::prepare_expert_inputs"] = hashlib.sha256(
-            inspect.getsource(batch_helper).encode()
-        ).hexdigest()
+    # The selected dataset method, serialized input contract and WAV resolver
+    # cover effective dispatch without hashing unrelated expert branches.
     if getattr(contract, "requires_wav_paths", False):
         extra_implementation["data/moe_expert_cache.py::resolve_manifest_wav_paths"] = hashlib.sha256(
             inspect.getsource(resolve_manifest_wav_paths).encode()
@@ -327,7 +333,7 @@ def compute_expert_cache_identity(expert, config, *, contract=None, feature_dim=
     if preprocess_method is None:
         raise ValueError(f"No preprocessing implementation is registered for {expert!r}")
     preprocess_code = inspect.getsource(preprocess_method)
-    if expert in {"expert2", "expert4"}:
+    if method_name in {"_expert2_audio", "_expert4_audio"}:
         preprocess_code += inspect.getsource(UnifiedXACLEDataset._mono_float)
     preprocessing = {
         "dataset_method": method_name,
@@ -402,12 +408,12 @@ def bind_json(path, value):
     _atomic_json(path, value)
 
 
-def checkpoint_provenance(config):
+def checkpoint_provenance(config, profile="top1_4"):
     cache = {}
     result = {}
-    for expert in EXPERT_ORDER:
+    for expert in profile_contract(profile)[0]:
         result[expert] = {}
-        for field in CHECKPOINT_FIELDS[expert]:
+        for field in FULL9_CHECKPOINT_FIELDS[expert]:
             path = Path(config["experts"][expert][field])
             if not path.is_file():
                 raise FileNotFoundError(f"Missing approved checkpoint: {path}")
@@ -449,7 +455,7 @@ def projected_dataset(dataset_root, split, work_root, *, limit=None):
 
 def prepare_expert_inputs(dataset, expert, records, *, start, device):
     """Build one expert's input from trusted dataset rows, preserving row order."""
-    contract = EXPERT_INPUT_CONTRACTS.get(expert) or TOP2_EXPERT_INPUT_CONTRACTS.get(expert)
+    contract = ALL_EXPERT_INPUT_CONTRACTS.get(expert)
     if contract is None:
         raise ValueError(f"No input contract is registered for {expert!r}")
     if not records:
@@ -517,20 +523,23 @@ def prepare_expert_inputs(dataset, expert, records, *, start, device):
     return inputs
 
 
-def prepare_job(config_path, dataset_root, output_root, *, batch_sizes=None, shard_size=128, limit=None, device=None):
+def prepare_job(config_path, dataset_root, output_root, *, batch_sizes=None, shard_size=128, limit=None, device=None, profile="top1_4"):
     if shard_size <= 0 or (limit is not None and not 1 <= limit <= 4):
         raise ValueError("shard_size must be positive; smoke limit must be 1..4")
     config = resolve_moe_paths(load_moe_config(config_path), config_path)
+    if config.get("expert_profile", "top1_4") != profile:
+        raise ValueError("requested extraction profile differs from configuration")
+    expert_order, feature_dimensions, _ = profile_contract(profile)
     selected_device = str(device if device is not None else config["runtime"]["device"])
     if selected_device == "auto":
         selected_device = "cuda:0" if torch.cuda.is_available() else "cpu"
     output = Path(output_root).resolve()
     cache_root = output / "feature_cache"
     work = cache_root / "projections"
-    batch_sizes = batch_sizes or dict.fromkeys(EXPERT_ORDER, 1)
-    if set(batch_sizes) != set(EXPERT_ORDER) or any(type(n) is not int or n <= 0 for n in batch_sizes.values()):
+    batch_sizes = batch_sizes or dict.fromkeys(expert_order, 1)
+    if set(batch_sizes) != set(expert_order) or any(type(n) is not int or n <= 0 for n in batch_sizes.values()):
         raise ValueError("Provide one positive extraction batch size per expert")
-    provenance = checkpoint_provenance(config)
+    provenance = checkpoint_provenance(config, profile)
     manifests = {}
     for split in EXPECTED_COUNTS:
         dataset, headers = projected_dataset(dataset_root, split, work, limit=limit)
@@ -554,31 +563,31 @@ def prepare_job(config_path, dataset_root, output_root, *, batch_sizes=None, sha
         print(f"{split}: {len(records)} pairs; columns={headers}; labels_consumed={split != 'test'}", flush=True)
     expert_identities = {
         expert: compute_expert_cache_identity(expert, config, device=selected_device)
-        for expert in EXPERT_ORDER
+        for expert in expert_order
     }
     assembly_identities = {}
     for split, manifest in manifests.items():
         assembly_identities[split] = build_assembly_identity(
-            expert_profile="top1_4",
-            expert_order=EXPERT_ORDER,
+            expert_profile=profile,
+            expert_order=expert_order,
             expert_cache_identities=expert_identities,
-            feature_dimensions=EXPERT_FEATURE_DIMS,
+            feature_dimensions=feature_dimensions,
             source_manifest_identity=manifest["sha256"],
         )
     job = {
         "schema_version": 2,
-        "expert_profile": "top1_4",
-        "expert_order": list(EXPERT_ORDER),
+        "expert_profile": profile,
+        "expert_order": list(expert_order),
         "inference_device": selected_device,
         "checkpoint_provenance": provenance,
         "expert_cache_identities": expert_identities,
-        "feature_dimensions": dict(EXPERT_FEATURE_DIMS),
+        "feature_dimensions": feature_dimensions,
         "assembly_identities": assembly_identities,
         "assembly_ids": {split: identity["assembly_id"] for split, identity in assembly_identities.items()},
         "preprocessing_identity": {
             "schema_version": 2,
-            "expert_profile": "top1_4",
-            "expert_order": list(EXPERT_ORDER),
+            "expert_profile": profile,
+            "expert_order": list(expert_order),
             "assembly_ids": {split: identity["assembly_id"] for split, identity in assembly_identities.items()},
         },
         "manifests": {key: val["sha256"] for key, val in manifests.items()},
@@ -617,7 +626,7 @@ def load_chunk(path, *, expert, records, identity, sample_identity=None):
         path,
         expert_identity=identity,
         sample_identity=sample_identity,
-        feature_dim=EXPERT_FEATURE_DIMS[expert],
+        feature_dim=EXPERT_FEATURE_DIMS_FULL9[expert],
     )
 
 
@@ -667,6 +676,8 @@ def validate_manifests(job, manifests):
 def extract_worker(config, job, manifests, dataset_root, output_root, expert, device):
     from scripts.verify_real_expert_to_gate import memory_snapshot, _validate_real_module_origins
     validate_manifests(job, manifests)
+    if expert not in job["expert_order"]:
+        raise ValueError(f"Expert {expert!r} is outside the requested profile")
     if str(device) != job.get("inference_device"):
         raise ValueError(
             f"Worker device {device!r} differs from prepared cache inference device "
@@ -725,14 +736,23 @@ def extract_worker(config, job, manifests, dataset_root, output_root, expert, de
             raise ValueError(f"Checkpoint changed since expert cache preflight: {path}")
         stats[field] = (path.stat().st_size, path.stat().st_mtime_ns)
     measurements = [memory_snapshot("before_factory", device)]
-    adapter = create_expert_adapter(expert, config, device=device)
+    if expert == "top2_m2d":
+        from expert3_finetune.XACLE_2027_baselinemodel.models.moescore_expert3 import prepare_m2d_checkpoint
+        with tempfile.TemporaryDirectory(prefix="moescore-top2-m2d-layout-") as layout:
+            factory_config = copy.deepcopy(config)
+            factory_config["experts"][expert]["checkpoint"] = prepare_m2d_checkpoint(
+                Path(config["experts"][expert]["checkpoint"]), layout
+            )
+            adapter = create_expert_adapter(expert, factory_config, device=device)
+    else:
+        adapter = create_expert_adapter(expert, config, device=device)
     for field, before in stats.items():
         path = Path(config["experts"][expert][field])
         if before != (path.stat().st_size, path.stat().st_mtime_ns):
             raise ValueError("Checkpoint file changed during source factory restoration")
     if any(p.requires_grad for p in adapter.parameters()) or any(m.training for m in adapter.modules()):
         raise ValueError("Source factory must return a fully frozen/eval expert")
-    origins = _validate_real_module_origins(expert, config)
+    origins = _validate_real_module_origins(expert, config) if expert in EXPERT_ORDER else {}
     measurements.append(memory_snapshot("after_factory_and_restore", device))
     report = {"status": "IN_PROGRESS", "expert": expert, "pid": os.getpid(),
               "factory_restoration": "PASS_FROM_EXISTING_SOURCE_FACTORY", "frozen_eval": True,
@@ -801,11 +821,13 @@ def assemble_stores(job, manifests, output_root):
         }
         writer = MoeFeatureStoreWriter(final_root, split=split,
             expected_sample_ids=[r["sample_id"] for r in records], source_manifest_sha256=manifest["sha256"],
-            checkpoint_provenance=job["checkpoint_provenance"], preprocessing_identity=split_preprocessing_identity)
+            checkpoint_provenance=job["checkpoint_provenance"], preprocessing_identity=split_preprocessing_identity,
+            profile=job["expert_profile"], per_expert_cache_identities=job["expert_cache_identities"] if job["expert_profile"] == "full_9" else None,
+            assembly_identity=assembly if job["expert_profile"] == "full_9" else None)
         for index, start in enumerate(range(0, len(records), job["shard_size"])):
             selected = records[start:start + job["shard_size"]]
             outputs = {}
-            for expert in EXPERT_ORDER:
+            for expert in job["expert_order"]:
                 expert_identity = job["expert_cache_identities"][expert]
                 sample_identity = build_sample_identity(
                     split,
@@ -827,7 +849,7 @@ def assemble_stores(job, manifests, output_root):
                     sample_identity=sample_identity,
                 )
                 outputs[expert] = (torch.from_numpy(arrays["scores"]), torch.from_numpy(arrays["features"]))
-            scores, features = validate_and_assemble_expert_outputs(outputs)
+            scores, features = validate_and_assemble_expert_outputs(outputs, profile=job["expert_profile"])
             labels = np.asarray([r["label_raw"] for r in selected], dtype=np.float32) if split != "test" else None
             writer.write_shard(index, sample_ids=[r["sample_id"] for r in selected],
                                wave_file_names=[r["wave_file_name"] for r in selected],
@@ -874,10 +896,11 @@ def main(argv=None):
     parser.add_argument("--dataset-root", required=True)
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--batch-sizes", default="1,1,1,1")
+    parser.add_argument("--profile", choices=tuple(EXPERT_PROFILES), default="top1_4")
+    parser.add_argument("--batch-sizes", default=None)
     parser.add_argument("--shard-size", type=int, default=128)
     parser.add_argument("--smoke", action="store_true")
-    parser.add_argument("--worker", choices=EXPERT_ORDER)
+    parser.add_argument("--worker", choices=tuple(EXPERT_FEATURE_DIMS_FULL9))
     parser.add_argument("--assembly-id", help="Schema-v2 assembly job identity used by worker subprocesses")
     args = parser.parse_args(argv)
     root = Path(args.output_root)
@@ -887,6 +910,8 @@ def main(argv=None):
                 raise ValueError("Worker subprocess requires --assembly-id from its prepared assembly job")
             config = resolve_moe_paths(load_moe_config(args.config), args.config)
             job = json.loads((root / "feature_cache" / "jobs" / f"{args.assembly_id}.json").read_text())
+            if job["expert_profile"] != args.profile:
+                raise ValueError("Worker profile differs from prepared assembly job")
             manifests = {
                 split: json.loads(
                     (root / "feature_cache" / "manifests" / split / f"{job['manifests'][split]}.json").read_text()
@@ -895,16 +920,20 @@ def main(argv=None):
             }
             extract_worker(config, job, manifests, args.dataset_root, root, args.worker, args.device)
         else:
-            sizes = dict(zip(EXPERT_ORDER, map(int, args.batch_sizes.split(","))))
+            order = profile_contract(args.profile)[0]
+            values = [1] * len(order) if args.batch_sizes is None else [int(value) for value in args.batch_sizes.split(",")]
+            if len(values) != len(order):
+                raise ValueError(f"--batch-sizes requires {len(order)} values for {args.profile}")
+            sizes = dict(zip(order, values))
             _, job, manifests = prepare_job(args.config, args.dataset_root, root, batch_sizes=sizes,
                                             shard_size=args.shard_size, limit=4 if args.smoke else None,
-                                            device=args.device)
+                                            device=args.device, profile=args.profile)
             assembly_job_id = job_identity(job)
             if not completed_stores_match(job, manifests, root):
-                for expert in EXPERT_ORDER:
+                for expert in job["expert_order"]:
                     subprocess.run([sys.executable, str(Path(__file__).resolve()), "--config", args.config,
                         "--dataset-root", args.dataset_root, "--output-root", args.output_root,
-                        "--device", args.device, "--worker", expert,
+                        "--device", args.device, "--profile", args.profile, "--worker", expert,
                         "--assembly-id", assembly_job_id], check=True)
                 assemble_stores(job, manifests, root)
             print(json.dumps({"status": "PASS", "smoke": args.smoke,

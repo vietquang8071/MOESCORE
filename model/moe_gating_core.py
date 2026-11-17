@@ -8,6 +8,7 @@ from torch import nn
 from model.expert_adapters.registry import (
     EXPECTED_FEATURE_WIDTH,
     EXPERT_ORDER,
+    profile_contract,
 )
 
 
@@ -27,20 +28,23 @@ class GatingNetwork(nn.Module):
         self,
         input_feature_dim: int = EXPECTED_FEATURE_WIDTH,
         num_experts: int = len(EXPERT_ORDER),
+        profile: str = "top1_4",
     ) -> None:
         super().__init__()
-        if type(input_feature_dim) is not int or input_feature_dim != EXPECTED_FEATURE_WIDTH:
+        order, _, width = profile_contract(profile)
+        if type(input_feature_dim) is not int or input_feature_dim != width:
             raise ValueError(
                 f"input_feature_dim must match the registered feature width "
-                f"{EXPECTED_FEATURE_WIDTH}; got {input_feature_dim!r}"
+                f"{width}; got {input_feature_dim!r}"
             )
-        if type(num_experts) is not int or num_experts != len(EXPERT_ORDER):
+        if type(num_experts) is not int or num_experts != len(order):
             raise ValueError(
-                f"num_experts must be four to match EXPERT_ORDER; got {num_experts!r}"
+                f"num_experts must be {'four' if profile == 'top1_4' else len(order)} to match {profile}; got {num_experts!r}"
             )
 
-        self.input_feature_dim = EXPECTED_FEATURE_WIDTH
-        self.num_experts = len(EXPERT_ORDER)
+        self.profile = profile
+        self.input_feature_dim = width
+        self.num_experts = len(order)
         self.net = nn.Sequential(
             nn.Linear(self.input_feature_dim, GATING_HIDDEN_DIM),
             nn.LayerNorm(GATING_HIDDEN_DIM),

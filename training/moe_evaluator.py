@@ -15,7 +15,6 @@ import torch
 
 from loss.loss_function import get_loss_function
 from model.moe_gating_core import GatingNetwork
-from model.expert_adapters.registry import EXPECTED_FEATURE_WIDTH
 from training.target_transform import denormalize_predictions, normalize_targets
 
 
@@ -94,12 +93,14 @@ class MoeGateEvaluator:
         if missing:
             raise ValueError(f"feature batch is missing fields: {missing}")
         scores, features = batch["scores"], batch["features"]
+        if batch.get("expert_profile", "top1_4") != self.gating_network.profile:
+            raise ValueError("feature batch expert profile differs from the gating network")
         ids, filenames = batch["sample_ids"], batch["wave_file_names"]
-        if not isinstance(scores, torch.Tensor) or scores.ndim != 2 or scores.shape[1] != 4:
-            raise ValueError("scores must have shape [B,4]")
+        if not isinstance(scores, torch.Tensor) or scores.ndim != 2 or scores.shape[1] != self.gating_network.num_experts:
+            raise ValueError(f"scores must have shape [B,{self.gating_network.num_experts}]")
         batch_size = scores.shape[0]
-        if not isinstance(features, torch.Tensor) or features.shape != (batch_size, EXPECTED_FEATURE_WIDTH):
-            raise ValueError(f"features must have shape [B,{EXPECTED_FEATURE_WIDTH}]")
+        if not isinstance(features, torch.Tensor) or features.shape != (batch_size, self.gating_network.input_feature_dim):
+            raise ValueError(f"features must have shape [B,{self.gating_network.input_feature_dim}]")
         if scores.dtype != torch.float32 or features.dtype != torch.float32:
             raise TypeError("feature-store inputs must be float32")
         if not torch.isfinite(scores).all().item() or not torch.isfinite(features).all().item():
@@ -112,12 +113,7 @@ class MoeGateEvaluator:
         scores = scores.to(device=parameter.device, dtype=parameter.dtype)
         features = features.to(device=parameter.device, dtype=parameter.dtype)
         weights = self.gating_network(features)
-        prediction = (
-            scores[:, 0:1] * weights[:, 0:1]
-            + scores[:, 1:2] * weights[:, 1:2]
-            + scores[:, 2:3] * weights[:, 2:3]
-            + scores[:, 3:4] * weights[:, 3:4]
-        )
+        prediction = (scores * weights).sum(dim=1, keepdim=True)
         if not torch.isfinite(prediction).all().item():
             raise ValueError("gating prediction contains non-finite values")
         return prediction.reshape(-1), weights, scores, features

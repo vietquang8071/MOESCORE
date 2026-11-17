@@ -16,10 +16,12 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
 import yaml
+from model.expert_adapters.registry import EXPERT_PROFILES
 
 
 PathValue = Union[str, os.PathLike]
-EXPERT_ORDER = ("expert1", "expert2", "expert3", "expert4")
+EXPERT_ORDER = EXPERT_PROFILES["top1_4"]
+FULL9_EXPERT_ORDER = EXPERT_PROFILES["full_9"]
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _DEVICE_RE = re.compile(r"^cuda:\d+$")
 
@@ -80,13 +82,17 @@ def validate_moe_config(config: Any) -> None:
     _check_keys(
         config,
         field="configuration",
-        allowed={"schema_version", "runtime", "paths", "data", "experts", "gate"},
+        allowed={"schema_version", "runtime", "paths", "data", "experts", "gate", "expert_profile"},
         required={"schema_version", "runtime", "data", "experts", "gate"},
     )
 
     version = config["schema_version"]
     if type(version) is not int or version != 1:
         raise MoeConfigError(f"schema_version must be the supported integer 1; got {version!r}")
+    profile = config.get("expert_profile", "top1_4")
+    if profile not in {"top1_4", "full_9"}:
+        raise MoeConfigError("expert_profile must be 'top1_4' or 'full_9'")
+    expected_order = EXPERT_ORDER if profile == "top1_4" else FULL9_EXPERT_ORDER
 
     runtime = _mapping(config["runtime"], "runtime")
     _check_keys(
@@ -121,10 +127,10 @@ def validate_moe_config(config: Any) -> None:
     _path_field(data, "test_csv", "data.test_csv", required=False)
 
     experts = _mapping(config["experts"], "experts")
-    if set(experts) != set(EXPERT_ORDER):
-        raise MoeConfigError(
-            "experts must contain exactly expert1, expert2, expert3, and expert4"
-        )
+    if set(experts) != set(expected_order):
+        if profile == "top1_4":
+            raise MoeConfigError("experts must contain exactly expert1, expert2, expert3, and expert4")
+        raise MoeConfigError(f"experts must contain exactly the {profile} expert order: {expected_order}")
 
     expert1 = _mapping(experts["expert1"], "experts.expert1")
     e1_fields = {"pretrained_checkpoint", "finetuned_checkpoint", "enable_fusion"}
@@ -198,14 +204,27 @@ def validate_moe_config(config: Any) -> None:
         path_fields=e4_fields,
         allowed=e4_fields,
     )
+    if profile == "full_9":
+        specs = {
+            "top2_m2d": ({"checkpoint"}, {"checkpoint"}),
+            "top2_msclap": ({"checkpoint"}, {"checkpoint", "audio_roots"}),
+            "top2_laion": ({"checkpoint"}, {"checkpoint", "model_name_or_path"}),
+            "top2_mga": ({"pretrained_checkpoint"}, {"pretrained_checkpoint", "source_dir", "architecture_yaml"}),
+            "m2d_lora": ({"base_checkpoint", "finetuned_checkpoint"}, {"base_checkpoint", "finetuned_checkpoint"}),
+        }
+        for name, (required, allowed) in specs.items():
+            section = _mapping(experts[name], f"experts.{name}")
+            _validate_expert_paths(section, section=f"experts.{name}", required_fields=required,
+                                   path_fields=required | ({"source_dir", "architecture_yaml"} if name == "top2_mga" else set()),
+                                   allowed=allowed)
 
     gate = _mapping(config["gate"], "gate")
     gate_fields = {"expert_order", "hidden_dim", "dropout"}
     _check_keys(gate, field="gate", allowed=gate_fields, required=gate_fields)
     order = gate["expert_order"]
-    if not isinstance(order, (list, tuple)) or tuple(order) != EXPERT_ORDER:
+    if not isinstance(order, (list, tuple)) or tuple(order) != expected_order:
         raise MoeConfigError(
-            "gate.expert_order must be exactly [expert1, expert2, expert3, expert4]"
+            f"gate.expert_order must match {profile}: {expected_order}"
         )
     hidden_dim = gate["hidden_dim"]
     if type(hidden_dim) is not int or hidden_dim <= 0:
@@ -351,8 +370,15 @@ def resolve_moe_paths(
             "unilm_source_dir",
             "finetuned_checkpoint",
         ),
+        "top2_m2d": ("checkpoint",),
+        "top2_msclap": ("checkpoint",),
+        "top2_laion": ("checkpoint",),
+        "top2_mga": ("source_dir", "architecture_yaml", "pretrained_checkpoint"),
+        "m2d_lora": ("base_checkpoint", "finetuned_checkpoint"),
     }
     for expert_name, fields in expert_path_fields.items():
+        if expert_name not in output["experts"]:
+            continue
         expert = output["experts"][expert_name]
         for field in fields:
             expert[field] = _resolve_path_value(expert[field], root=resolved_resource_root)
@@ -399,7 +425,15 @@ def validate_moe_resources(config: Mapping) -> None:
     trusted identity even though a template may remain schema-valid.
     """
     failures = []
-    for field, keys, description in _FILE_RESOURCES + _DIRECTORY_RESOURCES:
+    resources = list(_FILE_RESOURCES + _DIRECTORY_RESOURCES)
+    if config.get("expert_profile", "top1_4") == "full_9":
+        resources.extend((f"experts.{name}.{key}", ("experts", name, key), "checkpoint file" if key not in {"source_dir"} else "source directory")
+                         for name, keys in {
+                             "top2_m2d": ("checkpoint",), "top2_msclap": ("checkpoint",),
+                             "top2_laion": ("checkpoint",), "top2_mga": ("source_dir", "architecture_yaml", "pretrained_checkpoint"),
+                             "m2d_lora": ("base_checkpoint", "finetuned_checkpoint"),
+                         }.items() for key in keys)
+    for field, keys, description in resources:
         try:
             value = _get_nested(config, keys)
         except (KeyError, TypeError):

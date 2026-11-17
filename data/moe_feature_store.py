@@ -25,10 +25,12 @@ from model.expert_adapters.registry import (
     EXPECTED_FEATURE_WIDTH,
     EXPERT_FEATURE_DIMS,
     EXPERT_ORDER,
+    profile_contract,
 )
 
 
 FEATURE_STORE_SCHEMA_VERSION = 1
+FULL9_FEATURE_STORE_SCHEMA_VERSION = 2
 _ARRAY_FILES = ("scores.npy", "features.npy", "labels_raw.npy", "num_class.npy")
 
 
@@ -141,11 +143,18 @@ class MoeFeatureStoreWriter:
         source_manifest_sha256: str,
         checkpoint_provenance: Mapping[str, Any],
         preprocessing_identity: Any,
+        profile: str = "top1_4",
+        per_expert_cache_identities: Optional[Mapping[str, Any]] = None,
+        assembly_identity: Optional[Mapping[str, Any]] = None,
     ) -> None:
         if split not in {"train", "validation", "test"}:
             raise ValueError("split must be train, validation, or test")
         self.root = Path(root).expanduser().resolve()
         self.split = split
+        self.profile = profile
+        self.expert_order, self.feature_dimensions, self.feature_width = profile_contract(profile)
+        self.schema_version = (FEATURE_STORE_SCHEMA_VERSION if profile == "top1_4"
+                               else FULL9_FEATURE_STORE_SCHEMA_VERSION)
         self.split_root = self.root / split
         self.shards_root = self.split_root / "shards"
         self.expected_sample_ids = _ids(expected_sample_ids, split=split, field="expected_sample_ids")
@@ -155,17 +164,25 @@ class MoeFeatureStoreWriter:
             or any(character not in "0123456789abcdef" for character in source_manifest_sha256.lower())
         ):
             raise ValueError("source_manifest_sha256 must be a 64-character hexadecimal SHA-256")
-        if not isinstance(checkpoint_provenance, Mapping) or tuple(checkpoint_provenance) != EXPERT_ORDER:
-            raise ValueError(f"checkpoint_provenance keys must follow {EXPERT_ORDER}")
+        if not isinstance(checkpoint_provenance, Mapping) or set(checkpoint_provenance) != set(self.expert_order):
+            raise ValueError(f"checkpoint_provenance keys must match {self.expert_order}")
         self.checkpoint_provenance = _json_metadata(checkpoint_provenance, "checkpoint_provenance")
-        if not all(isinstance(self.checkpoint_provenance[name], Mapping) for name in EXPERT_ORDER):
+        if not all(isinstance(self.checkpoint_provenance[name], Mapping) for name in self.expert_order):
             raise ValueError("checkpoint provenance for each expert must be a non-empty mapping")
-        if any(not self.checkpoint_provenance[name] for name in EXPERT_ORDER):
+        if any(not self.checkpoint_provenance[name] for name in self.expert_order):
             raise ValueError("checkpoint provenance for each expert must be non-empty")
         self.preprocessing_identity = _json_metadata(preprocessing_identity, "preprocessing_identity")
         if not self.preprocessing_identity:
             raise ValueError("preprocessing_identity must be non-empty")
         self.source_manifest_sha256 = source_manifest_sha256.lower()
+        self.per_expert_cache_identities = _json_metadata(per_expert_cache_identities, "per_expert_cache_identities") if per_expert_cache_identities is not None else None
+        self.assembly_identity = _json_metadata(assembly_identity, "assembly_identity") if assembly_identity is not None else None
+        if profile == "full_9" and (
+            not isinstance(self.per_expert_cache_identities, dict)
+            or set(self.per_expert_cache_identities) != set(self.expert_order)
+            or not isinstance(self.assembly_identity, dict)
+        ):
+            raise ValueError("full_9 store requires ordered expert cache identities and assembly identity")
         existing_manifest_path = self.split_root / "manifest.json"
         if existing_manifest_path.is_file():
             existing_manifest = validate_feature_store(self.root, split=self.split)
@@ -173,6 +190,9 @@ class MoeFeatureStoreWriter:
                 existing_manifest.get("source_manifest_sha256") != self.source_manifest_sha256
                 or existing_manifest.get("checkpoint_provenance") != self.checkpoint_provenance
                 or existing_manifest.get("preprocessing_identity") != self.preprocessing_identity
+                or existing_manifest.get("expert_profile", "top1_4") != self.profile
+                or existing_manifest.get("per_expert_cache_identities") != self.per_expert_cache_identities
+                or existing_manifest.get("assembly_identity") != self.assembly_identity
                 or [sample_id for shard in existing_manifest["shards"] for sample_id in shard["sample_ids"]]
                 != self.expected_sample_ids
             ):
@@ -208,8 +228,8 @@ class MoeFeatureStoreWriter:
         names = _filenames(wave_file_names, count)
         if not set(selected_ids).issubset(set(self.expected_sample_ids)):
             raise ValueError("shard contains sample IDs outside the source manifest")
-        score_array = _numeric_array(scores, "scores", np.dtype(np.float32), (count, len(EXPERT_ORDER)))
-        feature_array = _numeric_array(features, "features", np.dtype(np.float32), (count, EXPECTED_FEATURE_WIDTH))
+        score_array = _numeric_array(scores, "scores", np.dtype(np.float32), (count, len(self.expert_order)))
+        feature_array = _numeric_array(features, "features", np.dtype(np.float32), (count, self.feature_width))
         label_array = None
         if labels_raw is None:
             if self.split == "train":
@@ -253,7 +273,7 @@ class MoeFeatureStoreWriter:
                 np.save(temp / name, array, allow_pickle=False)
             file_hashes = {name: _sha256_file(temp / name) for name in arrays}
             metadata = {
-                "schema_version": FEATURE_STORE_SCHEMA_VERSION,
+                "schema_version": self.schema_version,
                 "split": self.split,
                 "shard_index": shard_index,
                 "sample_ids": selected_ids,
@@ -310,11 +330,11 @@ class MoeFeatureStoreWriter:
         if self.split == "train" and not labels_present:
             raise ValueError("training feature store must include raw labels")
         body = {
-            "schema_version": FEATURE_STORE_SCHEMA_VERSION,
+            "schema_version": self.schema_version,
             "split": self.split,
-            "expert_order": list(EXPERT_ORDER),
-            "feature_dimensions": dict(EXPERT_FEATURE_DIMS),
-            "feature_width": EXPECTED_FEATURE_WIDTH,
+            "expert_order": list(self.expert_order),
+            "feature_dimensions": self.feature_dimensions,
+            "feature_width": self.feature_width,
             "score_dtype": "float32",
             "feature_dtype": "float32",
             "label_dtype": "float32",
@@ -325,6 +345,13 @@ class MoeFeatureStoreWriter:
             "num_class_present": bool(num_class_present),
             "shards": entries,
         }
+        if self.profile == "full_9":
+            body.update({
+                "expert_profile": self.profile,
+                "per_expert_cache_identities": self.per_expert_cache_identities,
+                "assembly_identity": self.assembly_identity,
+                "source_manifest_identity": self.source_manifest_sha256,
+            })
         body["store_identity_sha256"] = _sha256_bytes(_canonical_json(body))
         manifest_path = self.split_root / "manifest.json"
         _atomic_json(manifest_path, body)
@@ -357,17 +384,35 @@ def validate_feature_store(
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"feature-store manifest is unreadable: {exc}") from exc
-    if manifest.get("schema_version") != FEATURE_STORE_SCHEMA_VERSION:
+    version = manifest.get("schema_version")
+    if version not in {FEATURE_STORE_SCHEMA_VERSION, FULL9_FEATURE_STORE_SCHEMA_VERSION}:
         raise ValueError("unsupported feature-store schema version")
+    profile = "top1_4" if version == FEATURE_STORE_SCHEMA_VERSION else manifest.get("expert_profile")
+    order, dimensions, feature_width = profile_contract(profile)
+    if version == FULL9_FEATURE_STORE_SCHEMA_VERSION:
+        from data.moe_expert_cache import validate_assembly_identity, _expert_cache_id
+        cache_ids = manifest.get("per_expert_cache_identities")
+        if (profile != "full_9" or not isinstance(cache_ids, dict)
+                or set(cache_ids) != set(order) or not isinstance(manifest.get("assembly_identity"), dict)
+                or manifest.get("source_manifest_identity") != manifest.get("source_manifest_sha256")):
+            raise ValueError("full_9 store identity metadata is incomplete")
+        assembly = manifest["assembly_identity"]
+        validate_assembly_identity(assembly, expected_expert_order=order)
+        verified_cache_ids = {name: _expert_cache_id(cache_ids[name], name=name) for name in order}
+        if (assembly.get("expert_profile") != profile
+                or assembly.get("feature_dimensions") != dimensions
+                or assembly.get("source_manifest_identity") != manifest["source_manifest_sha256"]
+                or assembly.get("expert_cache_identities") != verified_cache_ids):
+            raise ValueError("full_9 assembly identity differs from the store manifest")
     if manifest.get("split") != split:
         raise ValueError("feature-store split does not match the requested split")
-    if tuple(manifest.get("expert_order", ())) != EXPERT_ORDER:
+    if tuple(manifest.get("expert_order", ())) != order:
         raise ValueError("feature-store expert order mismatch")
-    if manifest.get("feature_dimensions") != dict(EXPERT_FEATURE_DIMS) or manifest.get("feature_width") != EXPECTED_FEATURE_WIDTH:
+    if manifest.get("feature_dimensions") != dimensions or manifest.get("feature_width") != feature_width:
         raise ValueError("feature-store feature dimensions do not match the verified registry")
     provenance = manifest.get("checkpoint_provenance")
-    if not isinstance(provenance, Mapping) or tuple(provenance) != EXPERT_ORDER or any(
-        not isinstance(provenance[name], Mapping) or not provenance[name] for name in EXPERT_ORDER
+    if not isinstance(provenance, Mapping) or set(provenance) != set(order) or any(
+        not isinstance(provenance[name], Mapping) or not provenance[name] for name in order
     ):
         raise ValueError("feature-store expert checkpoint provenance is incomplete")
     if not manifest.get("preprocessing_identity"):
@@ -402,7 +447,8 @@ def validate_feature_store(
             shard_meta = json.loads(metadata_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError(f"feature-store shard metadata is corrupt: {exc}") from exc
-        if shard_meta.get("split") != split or shard_meta.get("shard_index") != expected_index:
+        if (shard_meta.get("schema_version") != version or shard_meta.get("split") != split
+                or shard_meta.get("shard_index") != expected_index):
             raise ValueError("feature-store shard provenance mismatch")
         ids = _ids(shard_meta.get("sample_ids", []), split=split)
         names = _filenames(shard_meta.get("wave_file_names", []), len(ids))
@@ -435,8 +481,8 @@ def validate_feature_store(
             except Exception as exc:
                 raise ValueError(f"feature-store shard array is corrupt: {path}: {exc}") from exc
             count = len(ids)
-            expected_shape = (count, 4) if filename == "scores.npy" else (
-                (count, EXPECTED_FEATURE_WIDTH) if filename == "features.npy" else (count,)
+            expected_shape = (count, len(order)) if filename == "scores.npy" else (
+                (count, feature_width) if filename == "features.npy" else (count,)
             )
             expected_dtype = np.dtype(np.int64) if filename == "num_class.npy" else np.dtype(np.float32)
             array = arrays[filename]
@@ -454,6 +500,21 @@ def validate_feature_store(
     if not seen_ids:
         raise ValueError("feature store has no sample identities")
     return manifest
+
+
+def preprocessing_contract(manifest: Mapping[str, Any]) -> Any:
+    """Return split-independent inference provenance for checkpoint comparison."""
+    cache = manifest.get("per_expert_cache_identities")
+    if isinstance(cache, Mapping):
+        return {name: cache[name]["cache_id"] if isinstance(cache[name], Mapping) else cache[name]
+                for name in manifest["expert_order"]}
+    identity = manifest.get("preprocessing_identity")
+    if isinstance(identity, Mapping):
+        assembly = identity.get("assembly_identity")
+        if isinstance(assembly, Mapping):
+            return assembly.get("expert_cache_identities")
+        return identity.get("contract")
+    return identity
 
 
 class MoeFeatureStoreDataset(Dataset):
@@ -517,6 +578,7 @@ class MoeFeatureStoreDataset(Dataset):
             "sample_id": sample_ids[row],
             "wave_file_name": filenames[row],
             "split": self.split,
+            "expert_profile": self.manifest.get("expert_profile", "top1_4"),
             "scores": torch.from_numpy(np.array(arrays["scores.npy"][row], copy=True)),
             "features": torch.from_numpy(np.array(arrays["features.npy"][row], copy=True)),
         }
@@ -534,7 +596,9 @@ class MoeFeatureStoreDataset(Dataset):
 
 __all__ = [
     "FEATURE_STORE_SCHEMA_VERSION",
+    "FULL9_FEATURE_STORE_SCHEMA_VERSION",
     "MoeFeatureStoreDataset",
     "MoeFeatureStoreWriter",
     "validate_feature_store",
+    "preprocessing_contract",
 ]

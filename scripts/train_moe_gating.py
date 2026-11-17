@@ -18,7 +18,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from data.moe_training_dataset import MoeTrainingDataset, collate_moe_features
+from data.moe_feature_store import preprocessing_contract
 from model.moe_gating_core import GatingNetwork
+from model.expert_adapters.registry import profile_contract
 from training.checkpoint_manager import MoeCheckpointManager
 from training.config import load_moe_training_config
 from training.moe_evaluator import MoeGateEvaluator
@@ -46,13 +48,14 @@ def _checkpoint_config(config: dict[str, Any]) -> dict[str, Any]:
 
 def _store_provenance(train: MoeTrainingDataset, validation: MoeTrainingDataset) -> tuple[dict[str, Any], dict[str, str]]:
     train_manifest, val_manifest = train.manifest, validation.manifest
+    if (train_manifest.get("expert_profile", "top1_4") != val_manifest.get("expert_profile", "top1_4")
+            or train_manifest["expert_order"] != val_manifest["expert_order"]
+            or train_manifest["feature_dimensions"] != val_manifest["feature_dimensions"]):
+        raise ValueError("train and validation feature-store expert profiles differ")
     train_provenance = train_manifest["checkpoint_provenance"]
     if train_provenance != val_manifest["checkpoint_provenance"]:
         raise ValueError("train and validation feature stores use different expert checkpoint provenance")
-    def contract(manifest: dict[str, Any]) -> Any:
-        identity = manifest["preprocessing_identity"]
-        return identity.get("contract") if isinstance(identity, dict) else identity
-    train_contract, val_contract = contract(train_manifest), contract(val_manifest)
+    train_contract, val_contract = preprocessing_contract(train_manifest), preprocessing_contract(val_manifest)
     if train_contract != val_contract:
         raise ValueError("train and validation preprocessing contracts differ")
     identity = {
@@ -90,7 +93,9 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
         drop_last=False,
         collate_fn=collate_moe_features,
     )
-    gate = GatingNetwork().to(device)
+    profile = train_ds.manifest.get("expert_profile", "top1_4")
+    order, _, width = profile_contract(profile)
+    gate = GatingNetwork(input_feature_dim=width, num_experts=len(order), profile=profile).to(device)
     trainer = MoeGateTrainer(
         gate,
         config["training"]["loss"],

@@ -10,9 +10,7 @@ from torch import nn
 
 from model.expert_adapters.base import ExpertAdapter
 from model.expert_adapters.registry import (
-    EXPECTED_FEATURE_WIDTH,
-    EXPERT_FEATURE_DIMS,
-    EXPERT_ORDER,
+    profile_contract,
     validate_and_assemble_expert_outputs,
 )
 from model.moe_gating_core import GatingNetwork
@@ -29,12 +27,14 @@ class MoEForwardIntegration(nn.Module):
         self,
         experts: Mapping[str, ExpertAdapter],
         gating_network: Optional[GatingNetwork] = None,
+        profile: str = "top1_4",
     ) -> None:
         super().__init__()
         if not isinstance(experts, Mapping):
             raise TypeError("experts must be a mapping keyed by expert name")
         actual_names = set(experts)
-        expected_names = set(EXPERT_ORDER)
+        order, dimensions, width = profile_contract(profile)
+        expected_names = set(order)
         missing = expected_names - actual_names
         unexpected = actual_names - expected_names
         if missing or unexpected:
@@ -45,11 +45,11 @@ class MoEForwardIntegration(nn.Module):
 
         ordered_experts: dict[str, ExpertAdapter] = {}
         object_ids: set[int] = set()
-        for name in EXPERT_ORDER:
+        for name in order:
             adapter = experts[name]
             if not isinstance(adapter, ExpertAdapter):
                 raise TypeError(f"{name} must be an ExpertAdapter instance")
-            expected_dim = EXPERT_FEATURE_DIMS[name]
+            expected_dim = dimensions[name]
             if adapter.feature_dim != expected_dim:
                 raise ValueError(
                     f"{name}.feature_dim must be {expected_dim}; got {adapter.feature_dim}"
@@ -60,18 +60,20 @@ class MoEForwardIntegration(nn.Module):
             ordered_experts[name] = adapter
 
         if gating_network is None:
-            gating_network = GatingNetwork()
+            gating_network = GatingNetwork(input_feature_dim=width, num_experts=len(order), profile=profile)
         if not isinstance(gating_network, GatingNetwork):
             raise TypeError("gating_network must be a GatingNetwork instance")
-        if gating_network.input_feature_dim != EXPECTED_FEATURE_WIDTH:
+        if gating_network.input_feature_dim != width or gating_network.profile != profile:
             raise ValueError(
-                f"gating network must accept {EXPECTED_FEATURE_WIDTH} features; "
+                f"gating network must accept {width} features for {profile}; "
                 f"got {gating_network.input_feature_dim}"
             )
-        if gating_network.num_experts != len(EXPERT_ORDER):
+        if gating_network.num_experts != len(order):
             raise ValueError("gating network expert count must match EXPERT_ORDER")
 
         self.experts = nn.ModuleDict(ordered_experts)
+        self.profile = profile
+        self.expert_order = order
         self.gating_network = gating_network
         self._freeze_experts()
 
@@ -98,7 +100,7 @@ class MoEForwardIntegration(nn.Module):
         with torch.no_grad():
             expert_outputs = {
                 name: self.experts[name](batch)
-                for name in EXPERT_ORDER
+                for name in self.expert_order
             }
 
         return self.forward_from_expert_outputs(expert_outputs)
@@ -119,7 +121,7 @@ class MoEForwardIntegration(nn.Module):
             raise TypeError("expert_outputs must be a mapping keyed by expert name")
 
         scores, combined_features = validate_and_assemble_expert_outputs(
-            expert_outputs
+            expert_outputs, profile=self.profile
         )
         first_gate_parameter = next(self.gating_network.parameters())
         if combined_features.device != first_gate_parameter.device:
@@ -134,7 +136,7 @@ class MoEForwardIntegration(nn.Module):
             )
 
         weights = self.gating_network(combined_features)
-        expected_weight_shape = (scores.shape[0], len(EXPERT_ORDER))
+        expected_weight_shape = (scores.shape[0], len(self.expert_order))
         if tuple(weights.shape) != expected_weight_shape:
             raise ValueError(
                 f"gating weights must have shape {expected_weight_shape}; "
@@ -152,13 +154,8 @@ class MoEForwardIntegration(nn.Module):
         ):
             raise ValueError("gating weights must be nonnegative and sum to one per sample")
 
-        # Preserve the original MOESCORE four-term sum and score ordering.
-        final_score = (
-            scores[:, 0:1] * weights[:, 0:1]
-            + scores[:, 1:2] * weights[:, 1:2]
-            + scores[:, 2:3] * weights[:, 2:3]
-            + scores[:, 3:4] * weights[:, 3:4]
-        )
+        # Preserve each expert score and the selected profile's fixed order.
+        final_score = (scores * weights).sum(dim=1, keepdim=True)
         return final_score, weights
 
 

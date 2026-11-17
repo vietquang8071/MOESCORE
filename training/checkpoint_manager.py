@@ -12,11 +12,31 @@ from typing import Any, Optional
 
 import torch
 
-from model.expert_adapters.registry import EXPECTED_FEATURE_WIDTH
+from model.expert_adapters.registry import profile_contract
 from model.moe_gating_core import GatingNetwork
 
 
 CHECKPOINT_FORMAT_VERSION = 1
+FULL9_CHECKPOINT_FORMAT_VERSION = 2
+
+
+def _validate_gate_payload(payload: Mapping[str, Any], gate: GatingNetwork) -> None:
+    version = payload.get("format_version")
+    if version not in {CHECKPOINT_FORMAT_VERSION, FULL9_CHECKPOINT_FORMAT_VERSION}:
+        raise ValueError("unsupported gating checkpoint schema")
+    profile = "top1_4" if version == CHECKPOINT_FORMAT_VERSION else payload.get("expert_profile")
+    order, dimensions, width = profile_contract(profile)
+    if profile != gate.profile or payload.get("gate_input_dim") != width or payload.get("gate_expert_count") != len(order):
+        raise ValueError("checkpoint expert profile, feature width, or expert count is incompatible")
+    if version == FULL9_CHECKPOINT_FORMAT_VERSION and (
+        payload.get("expert_order") != list(order)
+        or payload.get("expert_feature_dimensions") != dimensions
+        or not isinstance(payload.get("expert_checkpoint_provenance"), Mapping)
+        or set(payload["expert_checkpoint_provenance"]) != set(order)
+        or not isinstance(payload.get("feature_store_identity"), Mapping)
+        or not all(payload["feature_store_identity"].get(key) for key in ("train", "validation", "preprocessing_contract"))
+    ):
+        raise ValueError("checkpoint full_9 order, dimensions, or provenance are incompatible")
 
 
 def _canonical(value: Any, field: str) -> bytes:
@@ -75,10 +95,11 @@ class MoeCheckpointManager:
         patience: int = 0,
         seed: int = 2027,
     ) -> Path:
-        if not isinstance(gating_network, GatingNetwork) or gating_network.input_feature_dim != EXPECTED_FEATURE_WIDTH:
-            raise ValueError(
-                f"checkpoint must contain the verified {EXPECTED_FEATURE_WIDTH}-dimensional gating network"
-            )
+        if not isinstance(gating_network, GatingNetwork):
+            raise ValueError("checkpoint must contain a verified gating network")
+        order, dimensions, width = profile_contract(gating_network.profile)
+        if gating_network.input_feature_dim != width or gating_network.num_experts != len(order):
+            raise ValueError("gating network does not match its expert profile")
         if type(epoch) is not int or epoch < 0 or type(global_step) is not int or global_step < 0:
             raise ValueError("epoch and global_step must be non-negative integers")
         if type(patience) is not int or patience < 0 or type(seed) is not int or seed < 0:
@@ -90,13 +111,18 @@ class MoeCheckpointManager:
         provenance_body = json.loads(_canonical(dict(expert_checkpoint_provenance), "expert_checkpoint_provenance").decode("utf-8"))
         if not identity_body or not provenance_body:
             raise ValueError("feature-store identity and expert checkpoint provenance are required")
+        if gating_network.profile == "full_9" and (
+            set(provenance_body) != set(order)
+            or not all(identity_body.get(key) for key in ("train", "validation", "preprocessing_contract"))
+        ):
+            raise ValueError("full_9 checkpoint requires complete expert and store provenance")
         if sampler_state is not None:
             sampler_body = json.loads(_canonical(dict(sampler_state), "sampler_state").decode("utf-8"))
         else:
             sampler_body = None
         gate_state = {key: value.detach().cpu().clone() for key, value in gating_network.state_dict().items()}
         payload = {
-            "format_version": CHECKPOINT_FORMAT_VERSION,
+            "format_version": (CHECKPOINT_FORMAT_VERSION if gating_network.profile == "top1_4" else FULL9_CHECKPOINT_FORMAT_VERSION),
             "gate_input_dim": gating_network.input_feature_dim,
             "gate_expert_count": gating_network.num_experts,
             "gating_state_dict": gate_state,
@@ -118,6 +144,14 @@ class MoeCheckpointManager:
             "cuda_rng_states": [state.cpu().clone() for state in torch.cuda.get_rng_state_all()]
             if torch.cuda.is_available() and torch.cuda.is_initialized() else [],
         }
+        if gating_network.profile == "full_9":
+            payload.update({
+                "expert_profile": gating_network.profile,
+                "expert_order": list(order),
+                "expert_feature_dimensions": dimensions,
+                "training_config": config_body,
+                "preprocessing_identity": identity_body.get("preprocessing_contract"),
+            })
         target = Path(path).expanduser().resolve()
         _atomic_torch_save(payload, target)
         return target
@@ -141,14 +175,9 @@ class MoeCheckpointManager:
             payload = torch.load(target, map_location="cpu", weights_only=True)
         except Exception as exc:
             raise ValueError(f"gating checkpoint cannot be safely loaded: {exc}") from exc
-        if not isinstance(payload, dict) or payload.get("format_version") != CHECKPOINT_FORMAT_VERSION:
+        if not isinstance(payload, dict):
             raise ValueError("unsupported gating checkpoint schema")
-        if payload.get("gate_input_dim") != EXPECTED_FEATURE_WIDTH:
-            raise ValueError(
-                f"checkpoint feature width is incompatible; legacy 7936-dimensional gates are rejected"
-            )
-        if payload.get("gate_expert_count") != 4:
-            raise ValueError("checkpoint expert count is incompatible")
+        _validate_gate_payload(payload, gating_network)
         expected_values = (
             ("config", dict(expected_config), "configuration"),
             ("feature_store_identity", dict(expected_feature_store_identity), "feature store identity"),
@@ -206,14 +235,9 @@ class MoeCheckpointManager:
             payload = torch.load(target, map_location="cpu", weights_only=True)
         except Exception as exc:
             raise ValueError(f"gating checkpoint cannot be safely loaded: {exc}") from exc
-        if not isinstance(payload, dict) or payload.get("format_version") != CHECKPOINT_FORMAT_VERSION:
+        if not isinstance(payload, dict):
             raise ValueError("unsupported gating checkpoint schema")
-        if payload.get("gate_input_dim") != EXPECTED_FEATURE_WIDTH:
-            raise ValueError(
-                f"checkpoint feature width is incompatible; legacy 7936-dimensional gates are rejected"
-            )
-        if payload.get("gate_expert_count") != 4:
-            raise ValueError("checkpoint expert count is incompatible")
+        _validate_gate_payload(payload, gating_network)
         expected_provenance = dict(expected_expert_checkpoint_provenance)
         _canonical(expected_provenance, "expected_expert_checkpoint_provenance")
         if payload.get("expert_checkpoint_provenance") != expected_provenance:

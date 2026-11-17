@@ -10,14 +10,13 @@ from torch import nn
 
 from loss.loss_function import get_loss_function
 from model.moe_gating_core import GatingNetwork
-from model.expert_adapters.registry import EXPECTED_FEATURE_WIDTH
 from training.target_transform import normalize_targets
 
 
 def diversity_loss(weights: torch.Tensor) -> torch.Tensor:
     """Source-equivalent entropy diversity penalty used by Train_MOE.py."""
-    if not isinstance(weights, torch.Tensor) or weights.ndim != 2 or weights.shape[1] != 4:
-        raise ValueError("weights must have shape [B,4]")
+    if not isinstance(weights, torch.Tensor) or weights.ndim != 2 or weights.shape[1] < 2:
+        raise ValueError("weights must have shape [B,E] with E >= 2")
     if not torch.isfinite(weights).all().item():
         raise ValueError("weights must be finite")
     num_experts = weights.shape[-1]
@@ -46,8 +45,6 @@ class MoeGateTrainer:
     ) -> None:
         if not isinstance(gating_network, GatingNetwork):
             raise TypeError("gating_network must be the verified GatingNetwork")
-        if gating_network.input_feature_dim != EXPECTED_FEATURE_WIDTH:
-            raise ValueError("gating network feature width must match the expert registry")
         if not isinstance(loss_config, Mapping):
             raise TypeError("loss_config must be a mapping accepted by the original loss factory")
         weights = loss_config.get("loss_weights")
@@ -90,6 +87,8 @@ class MoeGateTrainer:
         if batch.get("split") != expected_split:
             split_label = "training" if expected_split == "train" else expected_split
             raise ValueError(f"this operation requires the {split_label} split")
+        if batch.get("expert_profile", "top1_4") != self.gating_network.profile:
+            raise ValueError("batch expert profile differs from the gating network")
         if batch.get("labels_scale") != "raw_0_to_10":
             raise ValueError("training targets must be explicitly marked as raw_0_to_10")
         required = {"scores", "features", "labels_raw", "labels_scale"}
@@ -103,9 +102,9 @@ class MoeGateTrainer:
         if not all(isinstance(value, torch.Tensor) for value in (scores, features, labels)):
             raise TypeError("scores, features, and labels_raw must be tensors")
         batch_size = scores.shape[0] if scores.ndim else 0
-        if scores.shape != (batch_size, 4) or features.shape != (batch_size, EXPECTED_FEATURE_WIDTH) or labels.shape != (batch_size,):
+        if scores.shape != (batch_size, self.gating_network.num_experts) or features.shape != (batch_size, self.gating_network.input_feature_dim) or labels.shape != (batch_size,):
             raise ValueError(
-                f"batch tensors must have shapes [B,4], [B,{EXPECTED_FEATURE_WIDTH}], and [B]"
+                f"batch tensors must have shapes [B,{self.gating_network.num_experts}], [B,{self.gating_network.input_feature_dim}], and [B]"
             )
         if batch_size <= 0:
             raise ValueError("batch size must be positive")
@@ -130,12 +129,7 @@ class MoeGateTrainer:
     def _losses(self, scores: torch.Tensor, features: torch.Tensor, labels_raw: torch.Tensor, classes: Optional[torch.Tensor]) -> dict[str, torch.Tensor]:
         targets = normalize_targets(labels_raw)
         weights = self.gating_network(features)
-        prediction = (
-            scores[:, 0:1] * weights[:, 0:1]
-            + scores[:, 1:2] * weights[:, 1:2]
-            + scores[:, 2:3] * weights[:, 2:3]
-            + scores[:, 3:4] * weights[:, 3:4]
-        )
+        prediction = (scores * weights).sum(dim=1, keepdim=True)
         # Original ClippedMSE/ContrastiveLoss compare per-utterance vectors.
         # Flattening here prevents [B,1] x [B] broadcasting into [B,B].
         prediction_for_loss = prediction.reshape(-1)

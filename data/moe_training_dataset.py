@@ -9,7 +9,7 @@ import torch
 from torch.utils.data import Dataset
 
 from data.moe_feature_store import MoeFeatureStoreDataset
-from model.expert_adapters.registry import EXPECTED_FEATURE_WIDTH
+from model.expert_adapters.registry import profile_contract
 
 
 class MoeTrainingDataset(Dataset):
@@ -34,6 +34,11 @@ def collate_moe_features(samples: Sequence[Mapping[str, Any]]) -> dict[str, Any]
     splits = {sample.get("split") for sample in samples}
     if len(splits) != 1 or None in splits:
         raise ValueError("a feature batch must contain records from exactly one split")
+    profiles = {sample.get("expert_profile", "top1_4") for sample in samples}
+    if len(profiles) != 1:
+        raise ValueError("feature batch mixes expert profiles")
+    profile = next(iter(profiles))
+    order, _, feature_width = profile_contract(profile)
     sample_ids = [sample.get("sample_id") for sample in samples]
     filenames = [sample.get("wave_file_name") for sample in samples]
     if any(not isinstance(value, str) or not value for value in sample_ids + filenames):
@@ -45,10 +50,10 @@ def collate_moe_features(samples: Sequence[Mapping[str, Any]]) -> dict[str, Any]
 
     score_tensors = [sample.get("scores") for sample in samples]
     feature_tensors = [sample.get("features") for sample in samples]
-    if any(not isinstance(value, torch.Tensor) or value.shape != (4,) or value.dtype != torch.float32 for value in score_tensors):
-        raise ValueError("each sample score must be CPU float32 [4]")
-    if any(not isinstance(value, torch.Tensor) or value.shape != (EXPECTED_FEATURE_WIDTH,) or value.dtype != torch.float32 for value in feature_tensors):
-        raise ValueError(f"each sample feature must be CPU float32 [{EXPECTED_FEATURE_WIDTH}]")
+    if any(not isinstance(value, torch.Tensor) or value.shape != (len(order),) or value.dtype != torch.float32 for value in score_tensors):
+        raise ValueError(f"each sample score must be CPU float32 [{len(order)}]")
+    if any(not isinstance(value, torch.Tensor) or value.shape != (feature_width,) or value.dtype != torch.float32 for value in feature_tensors):
+        raise ValueError(f"each sample feature must be CPU float32 [{feature_width}]")
     if any(value.device.type != "cpu" for value in score_tensors + feature_tensors):
         raise ValueError("feature-store batches must remain on CPU")
     if any(not torch.isfinite(value).all().item() for value in score_tensors + feature_tensors):
@@ -65,6 +70,7 @@ def collate_moe_features(samples: Sequence[Mapping[str, Any]]) -> dict[str, Any]
         "sample_ids": sample_ids,
         "wave_file_names": filenames,
         "split": next(iter(splits)),
+        "expert_profile": profile,
         "scores": torch.stack(score_tensors, dim=0),
         "features": torch.stack(feature_tensors, dim=0),
     }

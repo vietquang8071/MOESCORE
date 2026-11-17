@@ -17,7 +17,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from data.moe_training_dataset import MoeTrainingDataset, collate_moe_features
+from data.moe_feature_store import preprocessing_contract
 from model.moe_gating_core import GatingNetwork
+from model.expert_adapters.registry import profile_contract
 from training.checkpoint_manager import MoeCheckpointManager
 from training.config import load_moe_training_config
 from training.moe_evaluator import MoeGateEvaluator, write_submission_csv
@@ -35,15 +37,16 @@ def _device(value: str) -> torch.device:
 def infer_checkpoint(config: dict, checkpoint: str, output: str, *, device_override: str | None = None) -> dict:
     device = _device(device_override or config["runtime"]["device"])
     dataset = MoeTrainingDataset(config["data"]["feature_store_root"], split="test", require_labels=False)
-    gate = GatingNetwork().to(device)
+    profile = dataset.manifest.get("expert_profile", "top1_4")
+    order, _, width = profile_contract(profile)
+    gate = GatingNetwork(input_feature_dim=width, num_experts=len(order), profile=profile).to(device)
     payload = MoeCheckpointManager().load_for_inference(
         checkpoint,
         gating_network=gate,
         expected_expert_checkpoint_provenance=dataset.manifest["checkpoint_provenance"],
     )
     expected_contract = payload["feature_store_identity"].get("preprocessing_contract")
-    observed_identity = dataset.manifest["preprocessing_identity"]
-    observed_contract = observed_identity.get("contract") if isinstance(observed_identity, dict) else observed_identity
+    observed_contract = preprocessing_contract(dataset.manifest)
     if expected_contract != observed_contract:
         raise ValueError("test preprocessing contract differs from training checkpoint")
     loader = DataLoader(dataset, batch_size=config["inference"]["batch_size"], shuffle=False, num_workers=0, collate_fn=collate_moe_features)

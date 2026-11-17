@@ -22,13 +22,14 @@ import torch
 import yaml
 from torch.utils.data import DataLoader
 
-from data.moe_feature_store import validate_feature_store, _atomic_json, _sha256_file
+from data.moe_feature_store import validate_feature_store, preprocessing_contract, _atomic_json, _sha256_file
 from data.moe_training_dataset import MoeTrainingDataset, collate_moe_features
 from model.moe_gating_core import GatingNetwork
+from model.expert_adapters.registry import profile_contract
 from training.checkpoint_manager import MoeCheckpointManager
 from training.moe_evaluator import MoeGateEvaluator, compute_metrics, write_submission_csv
 from scripts.extract_moe_feature_store import (
-    EXPECTED_COUNTS, CHECKPOINT_FIELDS, fingerprint, projected_dataset,
+    EXPECTED_COUNTS, CHECKPOINT_FIELDS, FULL9_CHECKPOINT_FIELDS, fingerprint, projected_dataset,
 )
 
 
@@ -45,11 +46,13 @@ def discover_dataset(input_root, explicit=None):
 
 
 def generate_configs(project_root, dataset_root, weights_root, cache_dir, feature_store_root, output_dir, config_dir,
-                     *, expert_checkpoints=None):
+                     *, expert_checkpoints=None, profile="top1_4", unilm_source_dir=None):
     project, dataset, weights = map(lambda p: Path(p).resolve(), (project_root, dataset_root, weights_root))
     config_dir = Path(config_dir)
     config_dir.mkdir(parents=True, exist_ok=True)
-    expert = yaml.safe_load((project / "configs/moe_local.example.yaml").read_text())
+    profile_contract(profile)
+    template = "moe_full9.example.yaml" if profile == "full_9" else "moe_local.example.yaml"
+    expert = yaml.safe_load((project / "configs" / template).read_text())
     expert["paths"] = {"project_root": str(project), "data_root": str(dataset), "resource_root": str(project)}
     expert["runtime"] = {"device": "cuda:0", "offline": True, "cache_dir": str(Path(cache_dir).resolve())}
     expert["data"] = {"train_csv": "meta_data/train_average.csv", "validation_csv": "meta_data/validation_average.csv",
@@ -61,19 +64,31 @@ def generate_configs(project_root, dataset_root, weights_root, cache_dir, featur
         "expert4": {"beats_checkpoint": "pretrained/BEATs_iter3_plus_AS2M.pt", "clap_checkpoint": "pretrained/laion-clap.pt",
                     "finetuned_checkpoint": "finetuned_weights/expert4_best.pt"},
     }
+    if profile == "full_9":
+        paths.update({
+            "top2_m2d": {"checkpoint": "pretrained/checkpoint-30.pth"},
+            "top2_msclap": {"checkpoint": "pretrained/CLAP_weights_2023.pth"},
+            "top2_laion": {"checkpoint": "pretrained/laion-clap.pt"},
+            "top2_mga": {"pretrained_checkpoint": "pretrained/mga-clap.pt"},
+            "m2d_lora": {"base_checkpoint": "pretrained/checkpoint-30.pth", "finetuned_checkpoint": "best.pt"},
+        })
+    selected_fields = {name: FULL9_CHECKPOINT_FIELDS[name] for name in profile_contract(profile)[0]}
     if expert_checkpoints is not None:
-        if set(expert_checkpoints) != set(CHECKPOINT_FIELDS):
-            raise ValueError("expert_checkpoints must contain exactly the four registered experts")
+        if set(expert_checkpoints) != set(selected_fields):
+            description = "the four registered experts" if profile == "top1_4" else "the nine full_9 experts"
+            raise ValueError(f"expert_checkpoints must contain exactly {description}")
         paths = expert_checkpoints
     for name, fields in paths.items():
-        if set(fields) != set(CHECKPOINT_FIELDS[name]):
+        if set(fields) != set(selected_fields[name]):
             raise ValueError(f"Invalid checkpoint fields for {name}: {sorted(fields)}")
         resolved_paths = {}
         for key, value in fields.items():
             path = Path(value)
             resolved_paths[key] = str((path if path.is_absolute() else weights / path).resolve())
         expert["experts"][name].update(resolved_paths)
-    expert["experts"]["expert4"]["unilm_source_dir"] = str(project / "expert4_finetune/unilm")
+    expert["experts"]["expert4"]["unilm_source_dir"] = str(
+        Path(unilm_source_dir).resolve() if unilm_source_dir else project / "expert4_finetune/unilm"
+    )
     train = yaml.safe_load((project / "configs/moe_cloud.example.yaml").read_text())
     # Explicit finalized user configuration, checked against the current schema.
     train["runtime"] = {"device": "auto", "seed": 2027}
@@ -107,12 +122,14 @@ def environment_report(require_cuda=True):
     return report
 
 
-def check_dependencies():
+def check_dependencies(profile="top1_4"):
     required = {"numpy": "numpy", "scipy": "scipy", "pandas": "pandas", "yaml": "PyYAML",
                 "soundfile": "soundfile", "torch": "torch", "torchaudio": "torchaudio",
                 "transformers": "transformers", "laion_clap": "laion-clap", "timm": "timm",
                 "librosa": "librosa", "einops": "einops", "tqdm": "tqdm",
                 "torchlibrosa": "torchlibrosa", "nnAudio": "nnAudio", "matplotlib": "matplotlib"}
+    if profile == "full_9":
+        required["msclap"] = "msclap"
     versions = {}
     for module, distribution in required.items():
         try:
@@ -121,13 +138,18 @@ def check_dependencies():
         except Exception as exc:
             raise RuntimeError(f"Dependency {distribution} unavailable/incompatible: {exc}. "
                                "Supply compatible wheels or install explicitly; do not replace PyTorch/CUDA automatically.") from exc
+    if profile == "full_9" and versions["msclap"] != "1.3.4":
+        raise RuntimeError(f"full_9 requires msclap==1.3.4 for verified center crop; installed {versions['msclap']}")
     return versions
 
 
-def check_text_cache(cache_dir, *, allow_download=False):
+def check_text_cache(cache_dir, *, allow_download=False, profile="top1_4"):
     """Check native lookup names in a fresh process before offline extraction."""
-    cache = str(Path(cache_dir).resolve())
-    os.environ.update(HF_HOME=cache, HF_HUB_CACHE=cache, TRANSFORMERS_CACHE=cache,
+    home = Path(cache_dir).expanduser().resolve()
+    if home.name == "hub":
+        home = home.parent
+    cache = str(home)
+    os.environ.update(HF_HOME=cache, HF_HUB_CACHE=str(home / "hub"), TRANSFORMERS_CACHE=str(home / "hub"),
                       HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", HF_DATASETS_OFFLINE="1")
     environment = dict(os.environ)
     if allow_download:
@@ -135,7 +157,7 @@ def check_text_cache(cache_dir, *, allow_download=False):
     with tempfile.TemporaryDirectory(prefix="moe-text-cache-") as temporary:
         report_path = Path(temporary) / "report.json"
         command = [sys.executable, str(Path(__file__).with_name("prepare_moe_text_cache.py")),
-                   "--cache-dir", cache, "--report-json", str(report_path)]
+                   "--cache-dir", cache, "--profile", profile, "--report-json", str(report_path)]
         if allow_download:
             command.append("--download")
         subprocess.run(command, env=environment, check=True)
@@ -149,7 +171,10 @@ def preflight(config, dataset_root, output_root, *, require_cuda=True, check_cac
     root = Path(output_root)
     root.mkdir(parents=True, exist_ok=True)
     report = {"environment": environment_report(require_cuda), "checkpoints": {}, "splits": {}}
-    for name, fields in CHECKPOINT_FIELDS.items():
+    if config.get("expert_profile", "top1_4") == "full_9":
+        report["dependencies"] = check_dependencies("full_9")
+    for name in profile_contract(config.get("expert_profile", "top1_4"))[0]:
+        fields = FULL9_CHECKPOINT_FIELDS[name]
         report["checkpoints"][name] = {}
         for field in fields:
             path = Path(config["experts"][name][field])
@@ -164,7 +189,8 @@ def preflight(config, dataset_root, output_root, *, require_cuda=True, check_cac
             raise ValueError(f"{split}: expected {expected} pairs, observed {len(dataset)}")
         report["splits"][split] = {"count": len(dataset), "headers": headers, "test_labels_read": False}
     if check_cache:
-        report["text_cache"] = check_text_cache(config["runtime"]["cache_dir"], allow_download=allow_download)
+        report["text_cache"] = check_text_cache(config["runtime"]["cache_dir"], allow_download=allow_download,
+                                                 profile=config.get("expert_profile", "top1_4"))
     report["disk_free_bytes"] = shutil.disk_usage(root).free
     report["status"] = "PASS"
     _atomic_json(root / "preflight.json", report)
@@ -224,18 +250,23 @@ def evaluate_best(config, dataset_root, *, checkpoint=None):
     device = _device(config["runtime"]["device"])
     sources = {split: verified_source_manifest(config["data"]["feature_store_root"], split) for split in ("validation", "test")}
     stores = {split: validate_feature_store(config["data"]["feature_store_root"], split=split) for split in sources}
-    if stores["validation"]["preprocessing_identity"] != stores["test"]["preprocessing_identity"]:
+    if (stores["validation"].get("schema_version") == 1
+            and "assembly_identity" not in stores["validation"].get("preprocessing_identity", {})
+            and stores["validation"]["preprocessing_identity"] != stores["test"]["preprocessing_identity"]):
+        raise ValueError("Test preprocessing identity differs from the verified validation store")
+    if preprocessing_contract(stores["validation"]) != preprocessing_contract(stores["test"]):
         raise ValueError("Test preprocessing identity differs from the verified validation store")
     reports = {}
     for split in ("validation", "test"):
         dataset = MoeTrainingDataset(config["data"]["feature_store_root"], split=split, require_labels=split == "validation")
         if split == "test" and dataset.manifest["labels_present"]:
             raise ValueError("Final test inference requires a label-free feature store")
-        gate = GatingNetwork().to(device)
+        profile = dataset.manifest.get("expert_profile", "top1_4")
+        order, _, width = profile_contract(profile)
+        gate = GatingNetwork(input_feature_dim=width, num_experts=len(order), profile=profile).to(device)
         payload = MoeCheckpointManager().load_for_inference(checkpoint, gating_network=gate,
                     expected_expert_checkpoint_provenance=dataset.manifest["checkpoint_provenance"])
-        observed = dataset.manifest["preprocessing_identity"]
-        if payload["feature_store_identity"].get("preprocessing_contract") != observed.get("contract"):
+        if payload["feature_store_identity"].get("preprocessing_contract") != preprocessing_contract(dataset.manifest):
             raise ValueError("Evaluation preprocessing contract differs from gate checkpoint")
         if split == "validation" and payload["feature_store_identity"].get("validation") != dataset.identity:
             raise ValueError("Validation store identity differs from checkpoint selection data")
@@ -289,7 +320,9 @@ def smoke_store(store_root, config):
     if len(dataset) > 4:
         raise ValueError("Smoke mode requires its separate store with at most four samples")
     torch.manual_seed(2027)
-    trainer = MoeGateTrainer(GatingNetwork(), config["training"]["loss"])
+    profile = dataset.manifest.get("expert_profile", "top1_4")
+    order, _, width = profile_contract(profile)
+    trainer = MoeGateTrainer(GatingNetwork(input_feature_dim=width, num_experts=len(order), profile=profile), config["training"]["loss"])
     batches = list(DataLoader(dataset, batch_size=2, shuffle=False, num_workers=0, collate_fn=collate_moe_features))
     results = []
     for step in range(3):

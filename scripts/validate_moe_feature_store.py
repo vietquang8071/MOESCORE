@@ -14,7 +14,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from data.moe_feature_store import validate_feature_store
-from model.expert_adapters.registry import EXPECTED_FEATURE_WIDTH, EXPERT_ORDER
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -31,8 +30,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "split": args.split,
             "sample_count": sum(shard["count"] for shard in manifest["shards"]),
             "shard_count": len(manifest["shards"]),
-            "scores_shape": [sum(shard["count"] for shard in manifest["shards"]), 4],
-            "features_shape": [sum(shard["count"] for shard in manifest["shards"]), EXPECTED_FEATURE_WIDTH],
+            "scores_shape": [sum(shard["count"] for shard in manifest["shards"]), len(manifest["expert_order"])],
+            "features_shape": [sum(shard["count"] for shard in manifest["shards"]), manifest["feature_width"]],
+            "expert_profile": manifest.get("expert_profile", "top1_4"),
             "store_identity_sha256": manifest["store_identity_sha256"],
             "labels_present": manifest["labels_present"],
             "expert_order": manifest["expert_order"],

@@ -243,21 +243,39 @@ def import_verified_outputs(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--artifact-dir", required=True)
+    parser.add_argument("--artifact-dir", default=None)
+    parser.add_argument("--assembly-id", default=None, help="Prepared schema-v2 per-expert cache assembly job")
     parser.add_argument("--output-root", required=True)
-    parser.add_argument("--split", choices=("train", "validation", "test"), required=True)
+    parser.add_argument("--split", choices=("train", "validation", "test"), default=None)
     parser.add_argument("--dataset-root", default=None)
     parser.add_argument("--shard-size", type=int, default=256)
     parser.add_argument("--report-json", default=None)
     args = parser.parse_args(argv)
     try:
-        report = import_verified_outputs(
-            artifact_dir=args.artifact_dir,
-            output_root=args.output_root,
-            split=args.split,
-            shard_size=args.shard_size,
-            dataset_root=args.dataset_root,
-        )
+        if args.assembly_id:
+            if args.artifact_dir or args.split:
+                raise ValueError("--assembly-id cannot be combined with legacy --artifact-dir/--split")
+            from scripts.extract_moe_feature_store import assemble_stores, assembly_store_root, job_identity
+            root = Path(args.output_root).expanduser().resolve()
+            job_path = root / "feature_cache" / "jobs" / f"{args.assembly_id}.json"
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            if job_identity(job) != args.assembly_id:
+                raise ValueError("prepared assembly job identity differs from filename")
+            manifests = {split: json.loads((root / "feature_cache" / "manifests" / split /
+                f"{digest}.json").read_text(encoding="utf-8")) for split, digest in job["manifests"].items()}
+            report = {"status": "PASS", "expert_profile": job["expert_profile"],
+                      "feature_store_root": str(assembly_store_root(root, job)),
+                      "splits": assemble_stores(job, manifests, root)}
+        else:
+            if not args.artifact_dir or not args.split:
+                raise ValueError("legacy import requires --artifact-dir and --split")
+            report = import_verified_outputs(
+                artifact_dir=args.artifact_dir,
+                output_root=args.output_root,
+                split=args.split,
+                shard_size=args.shard_size,
+                dataset_root=args.dataset_root,
+            )
     except Exception as exc:
         report = {"status": "FAIL", "error": f"{type(exc).__name__}: {exc}"}
         print(json.dumps(report, indent=2, ensure_ascii=False))

@@ -81,6 +81,12 @@ EXPERT_INPUT_CONTRACTS = MappingProxyType(
 # four-expert gate or forcing unrelated adapters to receive filesystem paths.
 TOP2_EXPERT_INPUT_CONTRACTS = MappingProxyType(
     {
+        "top2_laion": ExpertInputContract(
+            audio_key="expert1_wavs",
+            audio_shape=(None, 1, 480_000),
+            sample_rate_hz=48_000,
+            max_samples=480_000,
+        ),
         "top2_msclap": ExpertInputContract(
             audio_key="expert2_wavs",
             audio_shape=(None, 1, 320_000),

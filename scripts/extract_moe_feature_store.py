@@ -113,6 +113,8 @@ _TEXT_RESOURCE_IDS = {
     "top2_msclap": ("gpt2",),
     "top2_laion": ("roberta-base",),
     "top2_mga": ("bert-base-uncased",),
+    # PortableM2D's BertXEncoder defaults to this exact Hub ID.
+    "m2d_lora": ("google-bert/bert-base-uncased",),
 }
 _DEPENDENCIES = {
     "expert1": ("torch", "numpy", "laion-clap", "transformers", "torchaudio", "torchlibrosa"),
@@ -274,6 +276,10 @@ def compute_expert_cache_identity(expert, config, *, contract=None, feature_dim=
         implementation_files.update(
             _source_files_under(PROJECT_ROOT / "expert3_finetune/XACLE_2027_baselinemodel")
         )
+    if expert == "m2d_lora":
+        implementation_files.add(
+            PROJECT_ROOT / "model/expert_adapters/m2d_lora_runtime.py"
+        )
     if expert == "top2_mga" and not section.get("source_dir"):
         implementation_files.update(
             _source_files_under(PROJECT_ROOT / "expert2_finetune/MGA-CLAP")
@@ -308,7 +314,9 @@ def compute_expert_cache_identity(expert, config, *, contract=None, feature_dim=
         "dataset_method_sha256": hashlib.sha256(preprocess_code.encode()).hexdigest(),
         "effective_sample_rate_hz": TARGET_RATES["expert" + expert[-1]] if expert.startswith("expert") else contract.sample_rate_hz,
         "effective_sample_count": TARGET_SAMPLES["expert" + expert[-1]] if expert.startswith("expert") else contract.max_samples,
-        "train_crop_policy": "center_validation_mode" if expert == "expert1" else "not_randomized",
+        "train_crop_policy": (
+            "center_validation_mode" if method_name == "_expert1_audio" else "not_randomized"
+        ),
         "contract": asdict(contract),
     }
     runtime = config.get("runtime", {})
@@ -449,8 +457,12 @@ def prepare_expert_inputs(dataset, expert, records, *, start, device):
             raise ValueError(f"Source WAV changed after manifest selection: {record['sample_id']}")
         paths.append(str(path))
         captions.append(record["raw_caption"])
-        method = getattr(dataset, _PREPROCESS_METHODS[expert])
-        waveform = method(path, index) if expert == "expert1" else method(path)
+        method_name = _PREPROCESS_METHODS[expert]
+        method = getattr(dataset, method_name)
+        # Expert 1's preprocessing uses the row index only for train-mode random
+        # crops. Top2 LAION deliberately shares the same method and evaluation
+        # center crop, so dispatch on the method contract rather than expert ID.
+        waveform = method(path, index) if method_name == "_expert1_audio" else method(path)
         if expert == "expert4":
             waveform, valid_length = waveform
             valid_lengths.append(valid_length)

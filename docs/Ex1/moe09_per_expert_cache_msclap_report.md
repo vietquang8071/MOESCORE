@@ -113,3 +113,56 @@ Test mới bao gồm: giữ cache ID khi đăng ký expert khác; invalidation t
 - `tests/test_top2_adapters.py`
 
 Không thay đổi Top-1 expert math, model weights, gate, trainer, feature-store schema cũ hay source repository EnsembleSVR-XACLE. Không commit/push.
+
+## MOE-09.2.1 — P1 Review Fixes
+
+### P1.1 — M2D-LoRA cache provenance
+
+Root cause: cache identity chỉ băm `m2d_lora_adapter.py`, trong khi model construction, LoRA restore, interaction features, head score và score scaling nằm trong `m2d_lora_runtime.py`. Text resource của E34 BERT cũng chưa được khai báo.
+
+`compute_expert_cache_identity("m2d_lora", ...)` hiện băm thêm `model/expert_adapters/m2d_lora_runtime.py`. PortableM2D source tree vốn đã được đưa vào implementation provenance cho M2D-LoRA; test xác nhận `models/m2d/vendor/portable_m2d.py` nằm trong identity. Kiểm tra loader cho thấy `BertXEncoder` mặc định gọi `AutoTokenizer.from_pretrained()` và `AutoModel.from_pretrained()` với ID chính xác `google-bert/bert-base-uncased`; ID này đã được thêm vào `_TEXT_RESOURCE_IDS`.
+
+Hugging Face identity đọc ref đang chọn và SHA-256 của file trong snapshot, gồm config, tokenizer, vocabulary và model weights. Checkpoint backbone và E34 fine-tuned vẫn được định danh bằng kích thước và SHA-256 nội dung. Test fixture dùng snapshot giả trong thư mục tạm, không tải model hoặc thay checkpoint thật.
+
+### P1.2 — Top2 LAION preprocessing
+
+Root cause: dispatch truyền `index` chỉ khi `expert == "expert1"`, dù `top2_laion` cũng chọn `_expert1_audio`, method yêu cầu `(path, index)`. Ngoài ra, Top2 LAION chưa có input contract nên không thể tạo batch qua `prepare_expert_inputs()`.
+
+Worker hiện quyết định số đối số từ tên method. Vì vậy `expert1` và `top2_laion` đều gọi `_expert1_audio(path, index)`; các method khác tiếp tục gọi với `path`. Đã thêm contract riêng cho Top2 LAION: key `expert1_wavs`, shape `[B,1,480000]`, float32, 48 kHz. Extraction vẫn đặt `dataset.split = "validation"`, do đó cả hai expert dùng center crop xác định khi waveform dài hơn 10 giây. Cache preprocessing provenance của method này giờ ghi rõ `center_validation_mode`, 48 kHz và 480.000 samples.
+
+Test dùng WAV PCM 48 kHz dài 10,10002 giây và so sánh chính xác với crop trung tâm bắt đầu tại `(484801 - 480000) // 2 = 2400`. Cả `expert1` và `top2_laion` gọi method thật với index `0`; tensor Top2 LAION có shape `(1,1,480000)`, float32 và giống tensor Expert 1. Test cũng kiểm tra từ chối caption/WAV identity bị sửa. Riêng Expert 4 vẫn giữ `expert4_wav_lens`; fixture xác nhận chiều dài hợp lệ `8000` được truyền nguyên vẹn.
+
+### Cache compatibility sau bản sửa
+
+- M2D-LoRA cache ID thay đổi vì identity nay có thêm runtime và BERT snapshot/ref. Shard cũ nằm nguyên trong namespace cũ, không được gán lại identity mới; nếu có, chúng không được reuse và cần inference lại.
+- Top2 LAION identity thay đổi vì input contract, invocation code và crop policy evaluation đã được ghi vào provenance. Cache cũ của LAION (nếu có) không được coi là center-crop cache.
+- Hash implementation của `prepare_expert_inputs()` là dependency dùng chung trong identity hiện tại. Sửa dispatch làm đổi hash đó, nên identity của các expert được tính bằng hàm này cũng đổi, kể cả Top-1 dù phép preprocessing Top-1 không đổi. Shard Top-1 cũ vẫn nguyên vẹn nhưng không tự động reuse theo identity mới; đây là invalidation fail-closed để tránh relabel shard dựa trên suy đoán.
+- Thay riêng nội dung `m2d_lora_runtime.py` trong source fixture làm đổi M2D-LoRA cache ID mà không đổi identity Expert 1. Sửa nội dung tokenizer/config hoặc ref BERT cũng làm đổi M2D-LoRA cache ID.
+- Registry order, gate, weights và công thức tính của bốn Top-1 experts không thay đổi. Pipeline bốn expert vẫn hoạt động; contract LAION chỉ mở đường input/preprocessing và chưa đăng ký expert vào gate hay extraction profile.
+
+### Kiểm chứng MOE-09.2.1
+
+Chạy với `/home/vitquay1708/miniconda3/envs/nlp/bin/python`:
+
+| Bộ test | Kết quả |
+|---|---:|
+| `test_moe09_per_expert_cache.py` | 18/18 PASS |
+| `test_kaggle_feature_extraction.py` | 4/4 PASS |
+| `test_top2_adapters.py` | 7/7 PASS |
+| `test_m2d_lora_adapter.py` | 8/8 PASS |
+| `test_moe09_2_1_regressions.py` | 5/5 PASS |
+| `test_moe_feature_store.py` | 6/6 PASS |
+| `py_compile` các module/test đã sửa | PASS |
+
+Tổng cộng: 48 test qua trong sáu bộ test.
+
+Smoke preprocessing trên XACLE 2027 development WAV thật: `train:00002.wav`, 10,242 giây, caption “Some liquid flows followed by something sink”. `top2_laion` tạo tensor `(1,1,480000)` float32; lần chạy lặp bằng bitwise-equal tensor và bằng tensor Expert 1 trên cùng sample. Đây chỉ là kiểm tra preprocessing; không nạp LAION model hoặc tính embedding/score.
+
+Không chạy full-dataset extraction, huấn luyện, hoặc tích hợp profile/gate chín expert.
+
+**Files bổ sung/sửa trong MOE-09.2.1:**
+
+- Sửa `scripts/extract_moe_feature_store.py` để bổ sung provenance M2D-LoRA/BERT, dispatch preprocessing theo method và ghi policy crop LAION.
+- Sửa `model/expert_adapters/registry.py` để khai báo input contract Top2 LAION 48 kHz.
+- Tạo `tests/test_moe09_2_1_regressions.py` cho fingerprint, snapshot BERT, LAION preprocessing, cache policy và Expert 4 lengths.
+- Cập nhật báo cáo này.

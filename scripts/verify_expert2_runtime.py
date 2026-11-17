@@ -342,9 +342,9 @@ def _verify_case(
         text_dim = int(text_embedding.shape[-1])
         if standalone_features.shape[1] != audio_dim + text_dim:
             raise RuntimeError("Standalone feature width does not equal audio MSC + text MSC width")
-        if audio_dim != text_dim or adapter.feature_dim != 5 * audio_dim:
+        if audio_dim != text_dim or adapter.feature_dim != 4 * audio_dim + 1:
             raise RuntimeError(
-                f"Adapter feature_dim={adapter.feature_dim} differs from five-block runtime width 5*{audio_dim}"
+                f"Adapter feature_dim={adapter.feature_dim} differs from runtime 4*{audio_dim}+1"
             )
 
         reference_formula = (audio_embedding * text_embedding).sum(dim=-1, keepdim=True)
@@ -390,7 +390,7 @@ def _verify_case(
             "feature_parity": {**feature_metrics, "passed": True},
             "audio_embedding_parity": {**audio_metrics, "passed": True},
             "text_embedding_parity": {**text_metrics, "passed": True},
-            "feature_order": "audio_MSC_then_text_MSC_then_absdiff_l2_then_product_l2_then_repeated_cosine_l2",
+            "feature_order": "audio_MSC_then_text_MSC_then_absdiff_l2_then_product_l2_then_cosine_l2_scalar",
             "standalone_invocation_counts": standalone_counts,
             "adapter_invocation_counts": adapter_counts,
             "audio_embedding_norms": _norms(audio_embedding),
@@ -567,8 +567,8 @@ def run(args: argparse.Namespace, summary: Dict[str, Any]) -> None:
     }
     if audio_width != codebook_width or text_width != codebook_width:
         raise RuntimeError("MGA audio/text projection widths differ from the shared MSC codebook")
-    if audio_width != text_width or adapter.feature_dim != 5 * audio_width:
-        raise RuntimeError("Adapter feature_dim does not equal five paired MSC feature blocks")
+    if audio_width != text_width or adapter.feature_dim != 4 * audio_width + 1:
+        raise RuntimeError("Adapter feature_dim does not equal paired MSC width 4D+1")
     summary["parameters"] = {
         "expert_total": total_parameters,
         "expert_trainable": trainable_parameters,

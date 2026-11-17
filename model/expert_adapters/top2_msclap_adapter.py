@@ -146,7 +146,7 @@ class Top2MSCLAPAdapter(ExpertAdapter):
         if not isinstance(clap_module, nn.Module):
             raise TypeError(f"{_ADAPTER_NAME} MS-CLAP API must expose its nn.Module as .clap")
         resolved_dim = _dimension_from_api(clap_api, embedding_dim)
-        super().__init__(feature_dim=5 * resolved_dim)
+        super().__init__(feature_dim=4 * resolved_dim + 1)
         self.embedding_dim = resolved_dim
         self.clap = clap_module
         self.clap_api = clap_api

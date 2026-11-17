@@ -10,7 +10,7 @@ def build_paired_cross_features(
     audio_embedding: torch.Tensor,
     text_embedding: torch.Tensor,
 ) -> torch.Tensor:
-    """Return ``[audio, text, |a_hat-t_hat|, a_hat*t_hat, cosine*1_D]``.
+    """Return ``[audio, text, |a_hat-t_hat|, a_hat*t_hat, cosine]``.
 
     The first two blocks preserve the input embedding values after conversion
     to float32. L2-normalized copies are used only for the three interaction
@@ -52,9 +52,8 @@ def build_paired_cross_features(
         dim=-1,
         keepdim=True,
     )
-    repeated_cosine = cosine_similarity.expand(-1, embedding_dim)
     return torch.cat(
-        [audio, text, absolute_difference, elementwise_product, repeated_cosine],
+        [audio, text, absolute_difference, elementwise_product, cosine_similarity],
         dim=-1,
     )
 

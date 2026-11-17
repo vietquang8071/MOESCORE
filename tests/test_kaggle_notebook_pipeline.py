@@ -32,7 +32,7 @@ def write_store(root, split):
     labels = np.array([2, 4, 7, 9], np.float32)
     scores = ((labels - 5) / 5)[:, None] + np.array([-.1, 0, .1, .2], np.float32)[None, :]
     writer.write_shard(0, sample_ids=ids, wave_file_names=[f"{i}.wav" for i in range(4)], scores=scores,
-        features=np.ones((4, 7936), np.float32), labels_raw=labels if split != "test" else None)
+        features=np.ones((4, 12544), np.float32), labels_raw=labels if split != "test" else None)
     writer.finalize()
     _atomic_json(root / split / "source_manifest.json", source)
 
@@ -82,7 +82,7 @@ class NotebookPipelineTests(unittest.TestCase):
     def test_full_precision_test_predictions_preserve_default_submission_rounding(self):
         gate = GatingNetwork().eval()
         batch = {"split": "test", "sample_ids": ["test:a.wav"], "wave_file_names": ["a.wav"],
-                 "scores": torch.full((1, 4), .123456), "features": torch.zeros(1, 7936)}
+                 "scores": torch.full((1, 4), .123456), "features": torch.zeros(1, 12544)}
         evaluator = MoeGateEvaluator(gate)
         precise = evaluator.predict([batch], round_scores=False)[0]["pred_score"]
         rounded = evaluator.predict([batch])[0]["pred_score"]

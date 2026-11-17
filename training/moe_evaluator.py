@@ -99,7 +99,7 @@ class MoeGateEvaluator:
             raise ValueError("scores must have shape [B,4]")
         batch_size = scores.shape[0]
         if not isinstance(features, torch.Tensor) or features.shape != (batch_size, EXPECTED_FEATURE_WIDTH):
-            raise ValueError("features must have shape [B,7936]")
+            raise ValueError(f"features must have shape [B,{EXPECTED_FEATURE_WIDTH}]")
         if scores.dtype != torch.float32 or features.dtype != torch.float32:
             raise TypeError("feature-store inputs must be float32")
         if not torch.isfinite(scores).all().item() or not torch.isfinite(features).all().item():

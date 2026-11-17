@@ -104,7 +104,9 @@ class MoeGateTrainer:
             raise TypeError("scores, features, and labels_raw must be tensors")
         batch_size = scores.shape[0] if scores.ndim else 0
         if scores.shape != (batch_size, 4) or features.shape != (batch_size, EXPECTED_FEATURE_WIDTH) or labels.shape != (batch_size,):
-            raise ValueError("batch tensors must have shapes [B,4], [B,7936], and [B]")
+            raise ValueError(
+                f"batch tensors must have shapes [B,4], [B,{EXPECTED_FEATURE_WIDTH}], and [B]"
+            )
         if batch_size <= 0:
             raise ValueError("batch size must be positive")
         if scores.dtype != torch.float32 or features.dtype != torch.float32 or labels.dtype != torch.float32:

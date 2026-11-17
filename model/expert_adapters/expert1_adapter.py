@@ -16,6 +16,7 @@ import torch
 from torch import nn
 
 from model.expert_adapters.base import ExpertAdapter
+from model.expert_adapters.paired_cross_features import build_paired_cross_features
 
 
 PathValue = Union[str, os.PathLike]
@@ -125,7 +126,7 @@ class Expert1Adapter(ExpertAdapter):
                 "or provide a positive dimension from trusted model metadata"
             )
 
-        super().__init__(feature_dim=2 * embedding_dim)
+        super().__init__(feature_dim=5 * embedding_dim)
         self.embedding_dim = embedding_dim
         self.model = model
         self._freeze_model()
@@ -369,7 +370,7 @@ class Expert1Adapter(ExpertAdapter):
             raise TypeError("Expert 1 audio/text embeddings must use the same dtype")
 
         score = (audio_embedding * text_embedding).sum(dim=-1)
-        features = torch.cat([audio_embedding, text_embedding], dim=-1)
+        features = build_paired_cross_features(audio_embedding, text_embedding)
         return score.unsqueeze(-1), features
 
     def _validate_embedding(self, embedding: Any, name: str, batch_size: int) -> None:

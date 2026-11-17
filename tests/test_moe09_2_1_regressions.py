@@ -43,6 +43,7 @@ def _cache_identity_project_fixture(root: Path) -> Path:
     project = root / "project"
     files = (
         "model/expert_adapters/base.py",
+        "model/expert_adapters/paired_cross_features.py",
         "model/expert_adapters/top2_common.py",
         "model/expert_adapters/m2d_lora_adapter.py",
         "model/expert_adapters/m2d_lora_runtime.py",

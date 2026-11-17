@@ -1045,7 +1045,7 @@ def _worker_pair(args: argparse.Namespace) -> int:
             outputs["expert2"] = expert2(_expert_input_batch(batch, "expert2", device))
             outputs["expert4"] = expert4(_expert_input_batch(batch, "expert4", device))
         report["stages"].append(memory_snapshot("AFTER_PAIR_INFERENCE", device))
-        if tuple(outputs["expert2"][0].shape) != (1, 1) or tuple(outputs["expert2"][1].shape) != (1, 2048):
+        if tuple(outputs["expert2"][0].shape) != (1, 1) or tuple(outputs["expert2"][1].shape) != (1, 5120):
             raise ValueError("live E2 output contract mismatch")
         if tuple(outputs["expert4"][0].shape) != (1, 1) or tuple(outputs["expert4"][1].shape) != (1, 1024):
             raise ValueError("live E4 output contract mismatch")

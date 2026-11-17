@@ -11,6 +11,7 @@ import torch
 from torch import nn
 
 from model.expert_adapters.base import ExpertAdapter
+from model.expert_adapters.paired_cross_features import build_paired_cross_features
 from model.expert_adapters.top2_common import (
     adapter_config,
     freeze_module,
@@ -88,7 +89,7 @@ class Top2M2DAdapter(ExpertAdapter):
                 f"{_ADAPTER_NAME} cannot determine the M2D-CLAP embedding width; "
                 "restore the source checkpoint or provide a trusted embedding_dim"
             )
-        super().__init__(feature_dim=2 * embedding_dim)
+        super().__init__(feature_dim=5 * embedding_dim)
         self.embedding_dim = embedding_dim
         self.model = model
         self._freeze_model()
@@ -177,7 +178,7 @@ class Top2M2DAdapter(ExpertAdapter):
         with torch.inference_mode():
             audio_embedding = self.model.encode_clap_audio(audio.squeeze(1))
             text_embedding = self.model.encode_clap_text(captions)
-        return pack_embeddings(
+        score, original_features = pack_embeddings(
             audio_embedding,
             text_embedding,
             batch_size=audio.shape[0],
@@ -185,6 +186,8 @@ class Top2M2DAdapter(ExpertAdapter):
             output_device=selected_device,
             adapter_name=_ADAPTER_NAME,
         )
+        audio_embedding, text_embedding = original_features.chunk(2, dim=-1)
+        return score, build_paired_cross_features(audio_embedding, text_embedding)
 
 
 __all__ = ["Top2M2DAdapter"]

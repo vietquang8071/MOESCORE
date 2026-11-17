@@ -76,7 +76,9 @@ class MoeCheckpointManager:
         seed: int = 2027,
     ) -> Path:
         if not isinstance(gating_network, GatingNetwork) or gating_network.input_feature_dim != EXPECTED_FEATURE_WIDTH:
-            raise ValueError("checkpoint must contain the verified 7936-dimensional gating network")
+            raise ValueError(
+                f"checkpoint must contain the verified {EXPECTED_FEATURE_WIDTH}-dimensional gating network"
+            )
         if type(epoch) is not int or epoch < 0 or type(global_step) is not int or global_step < 0:
             raise ValueError("epoch and global_step must be non-negative integers")
         if type(patience) is not int or patience < 0 or type(seed) is not int or seed < 0:
@@ -142,7 +144,9 @@ class MoeCheckpointManager:
         if not isinstance(payload, dict) or payload.get("format_version") != CHECKPOINT_FORMAT_VERSION:
             raise ValueError("unsupported gating checkpoint schema")
         if payload.get("gate_input_dim") != EXPECTED_FEATURE_WIDTH:
-            raise ValueError("checkpoint feature width is incompatible; legacy 7168-dimensional gates are rejected")
+            raise ValueError(
+                f"checkpoint feature width is incompatible; legacy 7936-dimensional gates are rejected"
+            )
         if payload.get("gate_expert_count") != 4:
             raise ValueError("checkpoint expert count is incompatible")
         expected_values = (
@@ -205,7 +209,9 @@ class MoeCheckpointManager:
         if not isinstance(payload, dict) or payload.get("format_version") != CHECKPOINT_FORMAT_VERSION:
             raise ValueError("unsupported gating checkpoint schema")
         if payload.get("gate_input_dim") != EXPECTED_FEATURE_WIDTH:
-            raise ValueError("checkpoint feature width is incompatible; legacy 7168-dimensional gates are rejected")
+            raise ValueError(
+                f"checkpoint feature width is incompatible; legacy 7936-dimensional gates are rejected"
+            )
         if payload.get("gate_expert_count") != 4:
             raise ValueError("checkpoint expert count is incompatible")
         expected_provenance = dict(expected_expert_checkpoint_provenance)

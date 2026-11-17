@@ -23,7 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from data.moe_feature_store import MoeFeatureStoreWriter
-from model.expert_adapters.registry import EXPERT_FEATURE_DIMS, EXPERT_ORDER
+from model.expert_adapters.registry import EXPECTED_FEATURE_WIDTH, EXPERT_FEATURE_DIMS, EXPERT_ORDER
 from scripts.verify_real_expert_to_gate import (
     load_output_artifact,
     validate_sample_manifest,
@@ -191,7 +191,7 @@ def import_verified_outputs(
     features = np.concatenate(
         [artifacts[name]["features"] for name in EXPERT_ORDER], axis=1
     ).astype(np.float32, copy=False)
-    if scores.shape != (len(records), 4) or features.shape != (len(records), 7936):
+    if scores.shape != (len(records), len(EXPERT_ORDER)) or features.shape != (len(records), EXPECTED_FEATURE_WIDTH):
         raise ValueError("assembled feature-store shape does not match LOCAL-08/10 contracts")
     writer = MoeFeatureStoreWriter(
         output_root,

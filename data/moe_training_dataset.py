@@ -48,7 +48,7 @@ def collate_moe_features(samples: Sequence[Mapping[str, Any]]) -> dict[str, Any]
     if any(not isinstance(value, torch.Tensor) or value.shape != (4,) or value.dtype != torch.float32 for value in score_tensors):
         raise ValueError("each sample score must be CPU float32 [4]")
     if any(not isinstance(value, torch.Tensor) or value.shape != (EXPECTED_FEATURE_WIDTH,) or value.dtype != torch.float32 for value in feature_tensors):
-        raise ValueError("each sample feature must be CPU float32 [7936]")
+        raise ValueError(f"each sample feature must be CPU float32 [{EXPECTED_FEATURE_WIDTH}]")
     if any(value.device.type != "cpu" for value in score_tensors + feature_tensors):
         raise ValueError("feature-store batches must remain on CPU")
     if any(not torch.isfinite(value).all().item() for value in score_tensors + feature_tensors):

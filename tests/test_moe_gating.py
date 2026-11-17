@@ -32,11 +32,11 @@ class GatingNetworkTests(unittest.TestCase):
     def test_original_architecture_consumes_registry_width_and_four_experts(self):
         gate = GatingNetwork()
 
-        self.assertEqual(EXPECTED_FEATURE_WIDTH, 7936)
+        self.assertEqual(EXPECTED_FEATURE_WIDTH, 12544)
         self.assertEqual(tuple(type(layer) for layer in gate.net), (
             nn.Linear, nn.LayerNorm, nn.ReLU, nn.Dropout, nn.Linear, nn.Softmax
         ))
-        self.assertEqual(gate.net[0].in_features, 7936)
+        self.assertEqual(gate.net[0].in_features, 12544)
         self.assertEqual(gate.net[0].out_features, 512)
         self.assertEqual(gate.net[1].normalized_shape, (512,))
         self.assertTrue(gate.net[2].inplace)
@@ -99,8 +99,8 @@ class GatingNetworkTests(unittest.TestCase):
         self.assertTrue(all(p.requires_grad for p in gate.parameters()))
 
     def test_invalid_width_rank_dtype_and_nonfinite_features_are_rejected(self):
-        with self.assertRaisesRegex(ValueError, "7936"):
-            GatingNetwork(input_feature_dim=7168)
+        with self.assertRaisesRegex(ValueError, "12544"):
+            GatingNetwork(input_feature_dim=7936)
         with self.assertRaisesRegex(ValueError, "four"):
             GatingNetwork(num_experts=3)
 
@@ -125,10 +125,10 @@ class GatingNetworkTests(unittest.TestCase):
         torch.testing.assert_close(source(features), restored(features), atol=0, rtol=0)
         self.assertEqual(source.state_dict().keys(), restored.state_dict().keys())
 
-    def test_legacy_7168_input_checkpoint_is_rejected_strictly(self):
+    def test_legacy_7936_input_checkpoint_is_rejected_strictly(self):
         gate = GatingNetwork()
         legacy_state = copy.deepcopy(gate.state_dict())
-        legacy_state["net.0.weight"] = torch.zeros(512, 7168)
+        legacy_state["net.0.weight"] = torch.zeros(512, 7936)
 
         with self.assertRaisesRegex(RuntimeError, "size mismatch"):
             gate.load_state_dict(legacy_state, strict=True)

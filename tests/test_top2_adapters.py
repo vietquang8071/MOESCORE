@@ -189,14 +189,14 @@ class Top2AdapterSmokeTests(unittest.TestCase):
 
                     score, features = adapter(batch)
                     self.assertEqual(tuple(score.shape), (2, 1))
-                    self.assertEqual(tuple(features.shape), (2, 8))
+                    self.assertEqual(tuple(features.shape), (2, 20))
                     self.assertEqual(score.dtype, torch.float32)
                     self.assertEqual(features.dtype, torch.float32)
                     self.assertEqual(score.device, features.device)
                     self.assertTrue(bool(torch.isfinite(score).all()))
                     self.assertTrue(bool(torch.isfinite(features).all()))
                     self.assertTrue(bool((score.abs() <= 1.000001).all()))
-                    expected = torch.nn.functional.cosine_similarity(features[:, :4], features[:, 4:])
+                    expected = torch.nn.functional.cosine_similarity(features[:, :4], features[:, 4:8])
                     torch.testing.assert_close(score[:, 0], expected)
 
                     if class_name == "Top2MSCLAPAdapter":
@@ -361,7 +361,7 @@ class Top2AdapterSmokeTests(unittest.TestCase):
             batch = _batch(batch_size=1)
             score, features = adapter(batch)
             self.assertEqual(tuple(score.shape), (1, 1))
-            self.assertEqual(tuple(features.shape), (1, 8))
+            self.assertEqual(tuple(features.shape), (1, 20))
             self.assertFalse(model.training)
             self.assertTrue(all(not parameter.requires_grad for parameter in model.parameters()))
 

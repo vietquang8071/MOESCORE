@@ -24,9 +24,37 @@ from model.expert_adapters.base import ExpertAdapter, validate_expert_output
 
 EXPERT_ORDER = ("expert1", "expert2", "expert3", "expert4")
 EXPERT_FEATURE_DIMS = MappingProxyType(
-    {"expert1": 1024, "expert2": 2048, "expert3": 3840, "expert4": 1024}
+    {"expert1": 2560, "expert2": 5120, "expert3": 3840, "expert4": 1024}
 )
 EXPECTED_FEATURE_WIDTH = sum(EXPERT_FEATURE_DIMS.values())
+
+# Metadata for the later nine-expert profile. The active registry/gate remain
+# four-expert until that integration milestone is implemented.
+FULL9_EXPERT_ORDER = (
+    "expert1",
+    "expert2",
+    "expert3",
+    "expert4",
+    "top2_m2d",
+    "top2_msclap",
+    "top2_laion",
+    "top2_mga",
+    "m2d_lora",
+)
+EXPERT_FEATURE_DIMS_FULL9 = MappingProxyType(
+    {
+        "expert1": 2560,
+        "expert2": 5120,
+        "expert3": 3840,
+        "expert4": 1024,
+        "top2_m2d": 3840,
+        "top2_msclap": 5120,
+        "top2_laion": 2560,
+        "top2_mga": 5120,
+        "m2d_lora": 3073,
+    }
+)
+EXPECTED_FULL9_FEATURE_WIDTH = sum(EXPERT_FEATURE_DIMS_FULL9.values())
 
 
 @dataclass(frozen=True)
@@ -108,10 +136,10 @@ class ExpertRegistration:
 EXPERT_REGISTRY = MappingProxyType(
     {
         "expert1": ExpertRegistration(
-            "model.expert_adapters.expert1_adapter", "Expert1Adapter", 1024
+            "model.expert_adapters.expert1_adapter", "Expert1Adapter", 2560
         ),
         "expert2": ExpertRegistration(
-            "model.expert_adapters.expert2_adapter", "Expert2Adapter", 2048
+            "model.expert_adapters.expert2_adapter", "Expert2Adapter", 5120
         ),
         "expert3": ExpertRegistration(
             "model.expert_adapters.expert3_adapter", "Expert3Adapter", 3840
@@ -346,10 +374,13 @@ def validate_and_assemble_expert_outputs(
 
 __all__ = [
     "EXPERT_FEATURE_DIMS",
+    "EXPERT_FEATURE_DIMS_FULL9",
     "EXPERT_INPUT_CONTRACTS",
     "EXPERT_ORDER",
     "EXPERT_REGISTRY",
     "EXPECTED_FEATURE_WIDTH",
+    "EXPECTED_FULL9_FEATURE_WIDTH",
+    "FULL9_EXPERT_ORDER",
     "ExpertInputContract",
     "ExpertRegistration",
     "create_expert_adapter",

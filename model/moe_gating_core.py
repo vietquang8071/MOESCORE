@@ -55,7 +55,7 @@ class GatingNetwork(nn.Module):
             raise TypeError("combined_features must be a torch.Tensor")
         if combined_features.ndim != 2:
             raise ValueError(
-                "combined_features must have shape [B,7936]; "
+                f"combined_features must have shape [B,{self.input_feature_dim}]; "
                 f"got {tuple(combined_features.shape)}"
             )
         if combined_features.shape[0] <= 0:

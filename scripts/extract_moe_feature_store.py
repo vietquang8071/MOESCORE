@@ -41,12 +41,26 @@ from data.moe_expert_cache import (
 )
 from model.expert_adapters.registry import (
     EXPERT_ORDER, EXPERT_FEATURE_DIMS, EXPERT_INPUT_CONTRACTS,
-    TOP2_EXPERT_INPUT_CONTRACTS, create_expert_adapter,
+    EXPERT_FEATURE_DIMS_FULL9, TOP2_EXPERT_INPUT_CONTRACTS, create_expert_adapter,
     validate_and_assemble_expert_outputs,
 )
 
 EXPECTED_COUNTS = {"train": 7500, "validation": 3000, "test": 3000}
 _TEXT_SNAPSHOT_CACHE = {}
+_PAIRED_CROSS_EXPERTS = frozenset(
+    {"expert1", "expert2", "top2_m2d", "top2_msclap", "top2_laion", "top2_mga"}
+)
+_PAIRED_CROSS_REPRESENTATION = {
+    "feature_representation": "paired_cross_v1",
+    "feature_blocks": [
+        "audio_embedding",
+        "text_embedding",
+        "absolute_difference_l2",
+        "elementwise_product_l2",
+        "repeated_cosine_l2",
+    ],
+    "feature_width_multiplier": 5,
+}
 CHECKPOINT_FIELDS = {
     "expert1": ("pretrained_checkpoint", "finetuned_checkpoint"),
     "expert2": ("pretrained_checkpoint", "finetuned_checkpoint"),
@@ -202,6 +216,8 @@ def compute_expert_cache_identity(expert, config, *, contract=None, feature_dim=
         raise ValueError(f"No effective input contract is defined for {expert!r}")
     if feature_dim is None:
         feature_dim = EXPERT_FEATURE_DIMS.get(expert)
+        if feature_dim is None:
+            feature_dim = EXPERT_FEATURE_DIMS_FULL9.get(expert)
     if type(feature_dim) is not int or feature_dim <= 0:
         raise ValueError(f"A verified feature_dim is required to identify {expert!r}")
     selected_device = str(device if device is not None else config.get("runtime", {}).get("device", "auto"))
@@ -240,6 +256,10 @@ def compute_expert_cache_identity(expert, config, *, contract=None, feature_dim=
         PROJECT_ROOT / _ADAPTER_SOURCE_FILES[expert],
         PROJECT_ROOT / "model/expert_adapters/base.py",
     }
+    if expert in _PAIRED_CROSS_EXPERTS:
+        implementation_files.add(
+            PROJECT_ROOT / "model/expert_adapters/paired_cross_features.py"
+        )
     extra_implementation = {}
     if expert.startswith("top2_") or expert == "m2d_lora":
         implementation_files.add(PROJECT_ROOT / "model/expert_adapters/top2_common.py")
@@ -360,6 +380,8 @@ def compute_expert_cache_identity(expert, config, *, contract=None, feature_dim=
     }
     if expert == "top2_msclap":
         score["score_semantics"] = "cosine(audio_embedding,text_embedding)"
+    if expert in _PAIRED_CROSS_EXPERTS:
+        score.update(_PAIRED_CROSS_REPRESENTATION)
     return build_expert_cache_identity(
         expert_name=expert,
         checkpoint_provenance=checkpoints or {"published_model_identities": {"text": text_resources}},

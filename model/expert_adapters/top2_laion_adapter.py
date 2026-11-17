@@ -10,6 +10,7 @@ import torch
 from torch import nn
 
 from model.expert_adapters.base import ExpertAdapter
+from model.expert_adapters.paired_cross_features import build_paired_cross_features
 from model.expert_adapters.top2_common import (
     adapter_config,
     freeze_module,
@@ -112,7 +113,7 @@ class Top2LAIONAdapter(ExpertAdapter):
                 f"{_ADAPTER_NAME} requires the 48 kHz MOESCORE expert1_wavs input; "
                 f"processor expects {resolved_rate} Hz"
             )
-        super().__init__(feature_dim=2 * resolved_dim)
+        super().__init__(feature_dim=5 * resolved_dim)
         self.embedding_dim = resolved_dim
         self.sample_rate = resolved_rate
         self.model = model
@@ -226,7 +227,7 @@ class Top2LAIONAdapter(ExpertAdapter):
                 text_embedding = self.model.get_text_embedding(
                     captions, use_tensor=True
                 )
-            return pack_embeddings(
+            score, original_features = pack_embeddings(
                 audio_embedding,
                 text_embedding,
                 batch_size=audio.shape[0],
@@ -234,6 +235,8 @@ class Top2LAIONAdapter(ExpertAdapter):
                 output_device=selected_device,
                 adapter_name=_ADAPTER_NAME,
             )
+            audio_embedding, text_embedding = original_features.chunk(2, dim=-1)
+            return score, build_paired_cross_features(audio_embedding, text_embedding)
 
         audio_values = audio[:, 0, :].float().detach().cpu().numpy()
         try:
@@ -272,7 +275,7 @@ class Top2LAIONAdapter(ExpertAdapter):
             raise RuntimeError(
                 f"{_ADAPTER_NAME} ClapModel output lacks paired audio_embeds/text_embeds"
             )
-        return pack_embeddings(
+        score, original_features = pack_embeddings(
             audio_embedding,
             text_embedding,
             batch_size=audio.shape[0],
@@ -280,6 +283,8 @@ class Top2LAIONAdapter(ExpertAdapter):
             output_device=selected_device,
             adapter_name=_ADAPTER_NAME,
         )
+        audio_embedding, text_embedding = original_features.chunk(2, dim=-1)
+        return score, build_paired_cross_features(audio_embedding, text_embedding)
 
 
 __all__ = ["Top2LAIONAdapter"]

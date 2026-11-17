@@ -13,6 +13,7 @@ import torch
 from torch import nn
 
 from model.expert_adapters.base import ExpertAdapter
+from model.expert_adapters.paired_cross_features import build_paired_cross_features
 from model.expert_adapters.top2_common import (
     adapter_config,
     freeze_module,
@@ -145,7 +146,7 @@ class Top2MSCLAPAdapter(ExpertAdapter):
         if not isinstance(clap_module, nn.Module):
             raise TypeError(f"{_ADAPTER_NAME} MS-CLAP API must expose its nn.Module as .clap")
         resolved_dim = _dimension_from_api(clap_api, embedding_dim)
-        super().__init__(feature_dim=2 * resolved_dim)
+        super().__init__(feature_dim=5 * resolved_dim)
         self.embedding_dim = resolved_dim
         self.clap = clap_module
         self.clap_api = clap_api
@@ -303,7 +304,7 @@ class Top2MSCLAPAdapter(ExpertAdapter):
         with torch.inference_mode(), cuda_context:
             audio_embedding = self.clap_api.get_audio_embeddings(paths)
             text_embedding = self.clap_api.get_text_embeddings(captions)
-        return pack_embeddings(
+        score, original_features = pack_embeddings(
             audio_embedding,
             text_embedding,
             batch_size=audio.shape[0],
@@ -311,6 +312,8 @@ class Top2MSCLAPAdapter(ExpertAdapter):
             output_device=selected_device,
             adapter_name=_ADAPTER_NAME,
         )
+        audio_embedding, text_embedding = original_features.chunk(2, dim=-1)
+        return score, build_paired_cross_features(audio_embedding, text_embedding)
 
 
 __all__ = ["Top2MSCLAPAdapter"]

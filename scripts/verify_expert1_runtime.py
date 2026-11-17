@@ -31,6 +31,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 import torch
 
 from model.expert_adapters.expert1_adapter import Expert1Adapter
+from model.expert_adapters.paired_cross_features import build_paired_cross_features
 
 
 AUDIO_SAMPLES = 48_000 * 10
@@ -284,10 +285,22 @@ def _verify_case(
         adapter_audio = adapter_embeddings["audio_embedding"]
         adapter_text = adapter_embeddings["text_embedding"]
         audio_feature = adapter_features[:, :dim]
-        text_feature = adapter_features[:, dim:]
+        text_feature = adapter_features[:, dim : 2 * dim]
+        interaction_features = adapter_features[:, 2 * dim :]
+        expected_features = build_paired_cross_features(ref_audio, ref_text)
 
         feature_audio_metrics = _close_metrics(audio_feature, ref_audio)
         feature_text_metrics = _close_metrics(text_feature, ref_text)
+        interaction_metrics = _close_metrics(interaction_features, expected_features[:, 2 * dim :])
+        full_feature_error = _assert_close(
+            adapter_features,
+            expected_features,
+            atol=atol,
+            rtol=rtol,
+            name=f"{label} paired cross-feature parity",
+        )
+        if full_feature_error:
+            case["errors"].append(full_feature_error)
         for component, actual, expected in (
             ("audio feature parity", audio_feature, ref_audio),
             ("text feature parity", text_feature, ref_text),
@@ -337,6 +350,10 @@ def _verify_case(
                 "text_feature_parity": {
                     **feature_text_metrics,
                     "passed": not any("text feature parity" in e for e in case["errors"]),
+                },
+                "interaction_feature_parity": {
+                    **interaction_metrics,
+                    "passed": full_feature_error is None,
                 },
                 "score_range": [
                     float(adapter_score.min().item()),
@@ -532,7 +549,7 @@ def run(args: argparse.Namespace, summary: Optional[Dict[str, Any]] = None) -> D
             "adapter_feature_dim": adapter.feature_dim,
             "dimension_metadata_match": (
                 adapter.embedding_dim == joint_embed_shape
-                and adapter.feature_dim == 2 * joint_embed_shape
+                and adapter.feature_dim == 5 * joint_embed_shape
             ),
             "model_precision": str(next(model.parameters()).dtype),
             "tokenizer_name_or_path": getattr(

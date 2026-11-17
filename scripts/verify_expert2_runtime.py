@@ -39,6 +39,7 @@ from model.expert_adapters.expert2_adapter import (
     Expert2Adapter,
     validate_mga_import_namespace,
 )
+from model.expert_adapters.paired_cross_features import build_paired_cross_features
 
 
 AUDIO_SAMPLES = 32_000 * 10
@@ -341,23 +342,27 @@ def _verify_case(
         text_dim = int(text_embedding.shape[-1])
         if standalone_features.shape[1] != audio_dim + text_dim:
             raise RuntimeError("Standalone feature width does not equal audio MSC + text MSC width")
-        if adapter.feature_dim != audio_dim + text_dim:
+        if audio_dim != text_dim or adapter.feature_dim != 5 * audio_dim:
             raise RuntimeError(
-                f"Adapter feature_dim={adapter.feature_dim} differs from runtime dimensions {audio_dim}+{text_dim}"
+                f"Adapter feature_dim={adapter.feature_dim} differs from five-block runtime width 5*{audio_dim}"
             )
 
         reference_formula = (audio_embedding * text_embedding).sum(dim=-1, keepdim=True)
         score_metrics = _metrics(adapter_score, standalone_score)
-        feature_metrics = _metrics(adapter_features, standalone_features)
+        expected_cross_features = build_paired_cross_features(
+            audio_embedding,
+            text_embedding,
+        )
+        feature_metrics = _metrics(adapter_features, expected_cross_features)
         audio_metrics = _metrics(audio_embedding, ref_audio)
         text_metrics = _metrics(text_embedding, ref_text)
         _assert_close(adapter_score, standalone_score, atol=atol, rtol=rtol, name=f"{label} score parity")
-        _assert_close(adapter_features, standalone_features, atol=atol, rtol=rtol, name=f"{label} feature parity")
+        _assert_close(adapter_features, expected_cross_features, atol=atol, rtol=rtol, name=f"{label} paired cross-feature parity")
         _assert_close(standalone_score, reference_formula, atol=atol, rtol=rtol, name=f"{label} original dot-product formula")
         _assert_close(standalone_features[:, :audio_dim], ref_audio, atol=atol, rtol=rtol, name=f"{label} audio feature ordering")
-        _assert_close(standalone_features[:, audio_dim:], ref_text, atol=atol, rtol=rtol, name=f"{label} text feature ordering")
+        _assert_close(standalone_features[:, audio_dim : 2 * audio_dim], ref_text, atol=atol, rtol=rtol, name=f"{label} text feature ordering")
         _assert_close(adapter_features[:, :audio_dim], audio_embedding, atol=atol, rtol=rtol, name=f"{label} adapter audio ordering")
-        _assert_close(adapter_features[:, audio_dim:], text_embedding, atol=atol, rtol=rtol, name=f"{label} adapter text ordering")
+        _assert_close(adapter_features[:, audio_dim : 2 * audio_dim], text_embedding, atol=atol, rtol=rtol, name=f"{label} adapter text ordering")
         for label_tensor, tensor in (
             ("standalone score", standalone_score),
             ("adapter score", adapter_score),
@@ -385,7 +390,7 @@ def _verify_case(
             "feature_parity": {**feature_metrics, "passed": True},
             "audio_embedding_parity": {**audio_metrics, "passed": True},
             "text_embedding_parity": {**text_metrics, "passed": True},
-            "feature_order": "audio_MSC_then_text_MSC",
+            "feature_order": "audio_MSC_then_text_MSC_then_absdiff_l2_then_product_l2_then_repeated_cosine_l2",
             "standalone_invocation_counts": standalone_counts,
             "adapter_invocation_counts": adapter_counts,
             "audio_embedding_norms": _norms(audio_embedding),
@@ -562,8 +567,8 @@ def run(args: argparse.Namespace, summary: Dict[str, Any]) -> None:
     }
     if audio_width != codebook_width or text_width != codebook_width:
         raise RuntimeError("MGA audio/text projection widths differ from the shared MSC codebook")
-    if adapter.feature_dim != audio_width + text_width:
-        raise RuntimeError("Adapter feature_dim does not equal actual configured MSC modality widths")
+    if audio_width != text_width or adapter.feature_dim != 5 * audio_width:
+        raise RuntimeError("Adapter feature_dim does not equal five paired MSC feature blocks")
     summary["parameters"] = {
         "expert_total": total_parameters,
         "expert_trainable": trainable_parameters,

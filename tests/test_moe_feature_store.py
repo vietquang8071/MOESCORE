@@ -50,7 +50,7 @@ class MoeFeatureStoreTests(unittest.TestCase):
         for shard_index, start in enumerate(range(0, len(ids), 2)):
             selected = ids[start : start + 2]
             scores = np.full((len(selected), 4), shard_index + 0.25, dtype=np.float32)
-            features = np.full((len(selected), 7936), shard_index + 1.5, dtype=np.float32)
+            features = np.full((len(selected), 12544), shard_index + 1.5, dtype=np.float32)
             kwargs = {}
             if labels:
                 kwargs["labels_raw"] = np.arange(start, start + len(selected), dtype=np.float32) + 4.0
@@ -74,15 +74,15 @@ class MoeFeatureStoreTests(unittest.TestCase):
             self.assertEqual(first["wave_file_name"], "0.wav")
             self.assertEqual(first["label_raw"].dtype, torch.float32)
             self.assertEqual(first["scores"].dtype, torch.float32)
-            self.assertEqual(first["features"].shape, (7936,))
+            self.assertEqual(first["features"].shape, (12544,))
             batch = collate_moe_features([second, first])
             self.assertEqual(batch["sample_ids"], ["train:1.wav", "train:0.wav"])
             self.assertEqual(batch["scores"].shape, (2, 4))
-            self.assertEqual(batch["features"].shape, (2, 7936))
+            self.assertEqual(batch["features"].shape, (2, 12544))
             self.assertEqual(batch["labels_raw"].shape, (2,))
             self.assertEqual(batch["labels_scale"], "raw_0_to_10")
             self.assertEqual(batch["labels_raw"].tolist(), [5.0, 4.0])
-            self.assertTrue(torch.equal(batch["features"][0], torch.full((7936,), 1.5)))
+            self.assertTrue(torch.equal(batch["features"][0], torch.full((12544,), 1.5)))
 
     def test_feature_collate_b1_b2_b4_preserves_values_and_order(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -96,7 +96,7 @@ class MoeFeatureStoreTests(unittest.TestCase):
                 preprocessing_identity={"contract": "synthetic-test-v1"},
             )
             scores = np.arange(16, dtype=np.float32).reshape(4, 4)
-            features = np.repeat(np.arange(4, dtype=np.float32)[:, None], 7936, axis=1)
+            features = np.repeat(np.arange(4, dtype=np.float32)[:, None], 12544, axis=1)
             writer.write_shard(
                 0,
                 sample_ids=ids,
@@ -111,7 +111,7 @@ class MoeFeatureStoreTests(unittest.TestCase):
                 samples = [dataset[index] for index in range(batch_size)]
                 batch = collate_moe_features(samples)
                 self.assertEqual(batch["scores"].shape, (batch_size, 4))
-                self.assertEqual(batch["features"].shape, (batch_size, 7936))
+                self.assertEqual(batch["features"].shape, (batch_size, 12544))
                 self.assertEqual(batch["labels_raw"].shape, (batch_size,))
                 self.assertEqual(batch["sample_ids"], ids[:batch_size])
                 torch.testing.assert_close(batch["scores"], torch.from_numpy(scores[:batch_size]))
@@ -134,7 +134,7 @@ class MoeFeatureStoreTests(unittest.TestCase):
                     sample_ids=["train:1.wav"],
                     wave_file_names=["1.wav"],
                     scores=np.zeros((1, 4), dtype=np.float32),
-                    features=np.zeros((1, 7936), dtype=np.float32),
+                    features=np.zeros((1, 12544), dtype=np.float32),
                 )
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -149,9 +149,12 @@ class MoeFeatureStoreTests(unittest.TestCase):
                 MoeFeatureStoreDataset(temporary, split="validation")
 
         cases = [
+            # Legacy Top1 vectors are 7936-wide and cannot be silently
+            # accepted under the paired-cross representation contract.
+            {"features": np.zeros((1, 7936), dtype=np.float32), "sample_ids": ["train:a.wav"]},
             {"features": np.zeros((1, 7935), dtype=np.float32), "sample_ids": ["train:a.wav"]},
-            {"features": np.full((1, 7936), np.nan, dtype=np.float32), "sample_ids": ["train:a.wav"]},
-            {"features": np.zeros((2, 7936), dtype=np.float32), "sample_ids": ["train:a.wav", "train:a.wav"]},
+            {"features": np.full((1, 12544), np.nan, dtype=np.float32), "sample_ids": ["train:a.wav"]},
+            {"features": np.zeros((2, 12544), dtype=np.float32), "sample_ids": ["train:a.wav", "train:a.wav"]},
         ]
         for case in cases:
             with self.subTest(case=case):
@@ -190,7 +193,7 @@ class MoeFeatureStoreTests(unittest.TestCase):
                 "sample_ids": ["train:a.wav"],
                 "wave_file_names": ["a.wav"],
                 "scores": np.zeros((1, 4), dtype=np.float32),
-                "features": np.ones((1, 7936), dtype=np.float32),
+                "features": np.ones((1, 12544), dtype=np.float32),
                 "labels_raw": np.asarray([5.0], dtype=np.float32),
             }
             writer.write_shard(0, **kwargs)

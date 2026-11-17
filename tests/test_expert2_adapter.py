@@ -18,6 +18,7 @@ from model.expert_adapters.expert2_adapter import (
     MGAImportNamespaceError,
     validate_mga_import_namespace,
 )
+from model.expert_adapters.paired_cross_features import build_paired_cross_features
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -168,12 +169,12 @@ class Expert2AdapterForwardTests(unittest.TestCase):
                 audio = model.audio_values.detach().expand(batch_size, -1)
                 text = model.text_values.detach().expand(batch_size, -1)
                 expected_score = (audio * text).sum(dim=-1, keepdim=True)
-                expected_features = torch.cat((audio, text), dim=-1)
+                expected_features = build_paired_cross_features(audio, text)
                 self.assertTrue(torch.equal(score, expected_score))
                 self.assertTrue(torch.equal(features, expected_features))
                 self.assertEqual(tuple(score.shape), (batch_size, 1))
-                self.assertEqual(tuple(features.shape), (batch_size, 10))
-                self.assertEqual(adapter.feature_dim, 10)
+                self.assertEqual(tuple(features.shape), (batch_size, 25))
+                self.assertEqual(adapter.feature_dim, 25)
                 self.assertEqual(model.calls, 1)
                 self.assertIs(model.last_batch["mga_wavs"], batch["expert2_wavs"])
                 self.assertEqual(
@@ -187,11 +188,11 @@ class Expert2AdapterForwardTests(unittest.TestCase):
         for dimension in (3, 7):
             with self.subTest(dimension=dimension):
                 adapter = Expert2Adapter(DummyExpert2(embedding_dim=dimension))
-                self.assertEqual(adapter.feature_dim, 2 * dimension)
+                self.assertEqual(adapter.feature_dim, 5 * dimension)
 
     def test_rejects_explicit_feature_width_that_disagrees_with_model(self):
         with self.assertRaisesRegex(ValueError, "feature_dim.*metadata"):
-            Expert2Adapter(DummyExpert2(embedding_dim=5), feature_dim=9)
+            Expert2Adapter(DummyExpert2(embedding_dim=5), feature_dim=24)
 
     def test_rejects_non_module_or_unknown_feature_width(self):
         with self.assertRaisesRegex(TypeError, "nn.Module"):
@@ -213,7 +214,7 @@ class Expert2AdapterForwardTests(unittest.TestCase):
         for invalid_output, message in (
             ("score_rank", "score must have shape"),
             ("score_matrix", "score must have shape"),
-            ("feature_width", "features width mismatch"),
+            ("feature_width", "original features width mismatch"),
             ("feature_rank", "features must have shape"),
             ("nonfinite", "finite values"),
             ("batch", "batch dimension mismatch"),
@@ -510,7 +511,7 @@ class Expert2AdapterFactoryTests(unittest.TestCase):
             }
             with self._factory_patch():
                 adapter = Expert2Adapter.from_config(config)
-            self.assertEqual(adapter.feature_dim, 8)
+            self.assertEqual(adapter.feature_dim, 20)
             config["experts"]["expert2"]["finetuned_checkpoint"] = paths[4].parent / "missing.pt"
             with self._factory_patch() as factory:
                 with self.assertRaisesRegex(FileNotFoundError, "fine-tuned"):

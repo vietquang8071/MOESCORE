@@ -104,7 +104,7 @@ class UnifiedAdapterIntegrationTests(unittest.TestCase):
 
         adapters = {
             "expert1": Expert1Adapter(e1_model, embedding_dim=512),
-            "expert2": Expert2Adapter(e2_model, feature_dim=2048),
+            "expert2": Expert2Adapter(e2_model, feature_dim=5120),
             "expert3": Expert3Adapter(e3_model),
             "expert4": Expert4Adapter(e4_model),
         }
@@ -126,8 +126,8 @@ class UnifiedAdapterIntegrationTests(unittest.TestCase):
 
         scores, features = validate_and_assemble_expert_outputs(outputs, batch_size=2)
         self.assertEqual(tuple(scores.shape), (2, 4))
-        self.assertEqual(tuple(features.shape), (2, 7936))
-        self.assertEqual([tuple(outputs[name][1].shape[1:]) for name in adapters], [(1024,), (2048,), (3840,), (1024,)])
+        self.assertEqual(tuple(features.shape), (2, 12544))
+        self.assertEqual([tuple(outputs[name][1].shape[1:]) for name in adapters], [(2560,), (5120,), (3840,), (1024,)])
 
         for adapter in adapters.values():
             self.assertTrue(all(not parameter.requires_grad for parameter in adapter.parameters()))
@@ -140,7 +140,7 @@ class UnifiedAdapterIntegrationTests(unittest.TestCase):
             batch = collate_unified([_sample(i, length=80_000 + i * 20_000) for i in range(batch_size)])
             adapters = {
                 "expert1": Expert1Adapter(_E1Model(), embedding_dim=512),
-                "expert2": Expert2Adapter(_MappingModel("mga_wavs", 2048), feature_dim=2048),
+                "expert2": Expert2Adapter(_MappingModel("mga_wavs", 2048), feature_dim=5120),
                 "expert3": Expert3Adapter(_E3Model()),
             }
             model4 = _MappingModel("wavs", 1024, score_rank=1)
@@ -150,7 +150,7 @@ class UnifiedAdapterIntegrationTests(unittest.TestCase):
             outputs = {name: adapter(batch) for name, adapter in adapters.items()}
             scores, features = validate_and_assemble_expert_outputs(outputs, batch_size=batch_size)
             self.assertEqual(tuple(scores.shape), (batch_size, 4))
-            self.assertEqual(tuple(features.shape), (batch_size, 7936))
+            self.assertEqual(tuple(features.shape), (batch_size, 12544))
 
 
 if __name__ == "__main__":

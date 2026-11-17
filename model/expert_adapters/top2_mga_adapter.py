@@ -19,6 +19,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from model.expert_adapters.base import ExpertAdapter
+from model.expert_adapters.paired_cross_features import build_paired_cross_features
 from model.expert_adapters.top2_common import (
     adapter_config,
     freeze_module,
@@ -138,7 +139,7 @@ class Top2MGAAdapter(ExpertAdapter):
             )
         if type(embedding_dim) is not int or embedding_dim <= 0:
             raise ValueError(f"{_ADAPTER_NAME} cannot determine the ASE projection width")
-        super().__init__(feature_dim=2 * embedding_dim)
+        super().__init__(feature_dim=5 * embedding_dim)
         self.embedding_dim = embedding_dim
         self.sample_rate = sample_rate
         self.model = model
@@ -288,7 +289,7 @@ class Top2MGAAdapter(ExpertAdapter):
                 attention_mask,
             )
             text_embedding = F.normalize(text_embedding, dim=-1)
-        return pack_embeddings(
+        score, original_features = pack_embeddings(
             audio_embedding,
             text_embedding,
             batch_size=audio.shape[0],
@@ -296,6 +297,8 @@ class Top2MGAAdapter(ExpertAdapter):
             output_device=selected_device,
             adapter_name=_ADAPTER_NAME,
         )
+        audio_embedding, text_embedding = original_features.chunk(2, dim=-1)
+        return score, build_paired_cross_features(audio_embedding, text_embedding)
 
 
 __all__ = ["Top2MGAAdapter"]

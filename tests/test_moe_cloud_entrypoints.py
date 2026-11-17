@@ -21,7 +21,7 @@ def _write_split(root: Path, split: str, *, labeled: bool) -> None:
     offsets = np.asarray([-0.1, 0.0, 0.1, 0.2], dtype=np.float32)
     scores = target[:, None] + offsets[None, :]
     generator = torch.Generator().manual_seed(300 + len(split))
-    features = torch.randn((count, 7936), generator=generator).numpy().astype(np.float32)
+    features = torch.randn((count, 12544), generator=generator).numpy().astype(np.float32)
     writer = MoeFeatureStoreWriter(
         root,
         split=split,

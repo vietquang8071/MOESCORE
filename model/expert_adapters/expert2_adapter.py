@@ -19,6 +19,7 @@ from torch import nn
 import yaml
 
 from model.expert_adapters.base import ExpertAdapter
+from model.expert_adapters.paired_cross_features import build_paired_cross_features
 
 
 PathValue = Union[str, os.PathLike]
@@ -221,9 +222,9 @@ class Expert2Adapter(ExpertAdapter):
     Args:
         model: Already constructed original ``expert2_model.Expert2`` (or a
             lightweight compatible ``nn.Module`` for contract tests).
-        feature_dim: Optional trusted total feature width. When the ASE model
-            exposes its two projection layers and shared MSC codebook, their
-            dimensions are used and any explicit value must agree.
+        feature_dim: Optional trusted total five-block feature width. When
+        the ASE model exposes its two projection layers and shared MSC
+        codebook, their dimensions are used and any explicit value must agree.
 
     The wrapped expert is registered as a child module, fully frozen, and kept
     in evaluation mode even if an outer model calls ``adapter.train()``.
@@ -238,21 +239,30 @@ class Expert2Adapter(ExpertAdapter):
             )
 
         dimensions = _msc_feature_dimensions(model)
-        metadata_dim = sum(dimensions) if dimensions is not None else None
+        embedding_dim = dimensions[0] if dimensions is not None else None
+        metadata_dim = 5 * embedding_dim if embedding_dim is not None else None
         if feature_dim is None:
             feature_dim = metadata_dim
         elif metadata_dim is not None and feature_dim != metadata_dim:
             raise ValueError(
-                "Expert 2 explicit feature_dim does not match ASE projection/codebook "
+                "Expert 2 explicit feature_dim does not match five-block ASE projection "
                 f"metadata: {feature_dim} != {metadata_dim}"
             )
+        elif metadata_dim is None and feature_dim % 5 == 0:
+            embedding_dim = feature_dim // 5
         if type(feature_dim) is not int or feature_dim <= 0:
             raise ValueError(
                 "Expert 2 feature_dim is unavailable; construct the original ASE model "
                 "or provide a positive width from trusted architecture metadata"
             )
+        if type(embedding_dim) is not int or embedding_dim <= 0 or feature_dim != 5 * embedding_dim:
+            raise ValueError(
+                "Expert 2 feature_dim must be five times a positive shared audio/text "
+                "embedding width"
+            )
 
         super().__init__(feature_dim=feature_dim)
+        self.embedding_dim = embedding_dim
         self.model = model
         self._freeze_model()
 
@@ -557,9 +567,27 @@ class Expert2Adapter(ExpertAdapter):
     def _forward(self, batch: Any) -> tuple[torch.Tensor, torch.Tensor]:
         audio, captions = self._validate_batch(batch)
         original_batch = {"mga_wavs": audio, "caption_tokens": captions}
-        # Original Expert2 already returns its cosine score [B,1] and ordered
-        # post-MSC [audio,text] features. Preserve both unchanged in one call.
-        return self.model(original_batch)
+        # Original Expert2 returns its score and ordered post-MSC [audio,text]
+        # blocks. Preserve that score and reuse the single source-model pass.
+        score, original_features = self.model(original_batch)
+        if not isinstance(original_features, torch.Tensor) or original_features.ndim != 2:
+            raise ValueError("Expert 2 original features must have shape [B,2D]")
+        if original_features.shape[0] != audio.shape[0]:
+            raise ValueError(
+                "Expert 2 original features batch dimension mismatch: "
+                f"{original_features.shape[0]} != {audio.shape[0]}"
+            )
+        if isinstance(score, torch.Tensor) and original_features.device != score.device:
+            raise ValueError("Expert 2 original score and features must be on the same device")
+        expected_original_width = 2 * self.embedding_dim
+        if original_features.shape[1] != expected_original_width:
+            raise ValueError(
+                "Expert 2 original features width mismatch: expected "
+                f"{expected_original_width}, got {original_features.shape[1]}"
+            )
+        audio_embedding, text_embedding = original_features.chunk(2, dim=-1)
+        features = build_paired_cross_features(audio_embedding, text_embedding)
+        return score, features
 
 
 __all__ = [

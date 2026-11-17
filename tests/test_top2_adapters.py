@@ -189,7 +189,7 @@ class Top2AdapterSmokeTests(unittest.TestCase):
 
                     score, features = adapter(batch)
                     self.assertEqual(tuple(score.shape), (2, 1))
-                    self.assertEqual(tuple(features.shape), (2, 20))
+                    self.assertEqual(tuple(features.shape), (2, 17))
                     self.assertEqual(score.dtype, torch.float32)
                     self.assertEqual(features.dtype, torch.float32)
                     self.assertEqual(score.device, features.device)
@@ -361,7 +361,7 @@ class Top2AdapterSmokeTests(unittest.TestCase):
             batch = _batch(batch_size=1)
             score, features = adapter(batch)
             self.assertEqual(tuple(score.shape), (1, 1))
-            self.assertEqual(tuple(features.shape), (1, 20))
+            self.assertEqual(tuple(features.shape), (1, 17))
             self.assertFalse(model.training)
             self.assertTrue(all(not parameter.requires_grad for parameter in model.parameters()))
 

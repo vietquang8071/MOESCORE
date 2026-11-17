@@ -222,7 +222,7 @@ class Expert2Adapter(ExpertAdapter):
     Args:
         model: Already constructed original ``expert2_model.Expert2`` (or a
             lightweight compatible ``nn.Module`` for contract tests).
-        feature_dim: Optional trusted total five-block feature width. When
+        feature_dim: Optional trusted four-vector-block plus scalar width. When
         the ASE model exposes its two projection layers and shared MSC
         codebook, their dimensions are used and any explicit value must agree.
 
@@ -240,25 +240,33 @@ class Expert2Adapter(ExpertAdapter):
 
         dimensions = _msc_feature_dimensions(model)
         embedding_dim = dimensions[0] if dimensions is not None else None
-        metadata_dim = 5 * embedding_dim if embedding_dim is not None else None
+        metadata_dim = 4 * embedding_dim + 1 if embedding_dim is not None else None
         if feature_dim is None:
             feature_dim = metadata_dim
         elif metadata_dim is not None and feature_dim != metadata_dim:
             raise ValueError(
-                "Expert 2 explicit feature_dim does not match five-block ASE projection "
+                "Expert 2 explicit feature_dim does not match 4D+1 ASE cross-feature "
                 f"metadata: {feature_dim} != {metadata_dim}"
             )
-        elif metadata_dim is None and feature_dim % 5 == 0:
-            embedding_dim = feature_dim // 5
+        elif (
+            metadata_dim is None
+            and (feature_dim - 1) > 0
+            and (feature_dim - 1) % 4 == 0
+        ):
+            embedding_dim = (feature_dim - 1) // 4
         if type(feature_dim) is not int or feature_dim <= 0:
             raise ValueError(
                 "Expert 2 feature_dim is unavailable; construct the original ASE model "
                 "or provide a positive width from trusted architecture metadata"
             )
-        if type(embedding_dim) is not int or embedding_dim <= 0 or feature_dim != 5 * embedding_dim:
+        if (
+            type(embedding_dim) is not int
+            or embedding_dim <= 0
+            or feature_dim != 4 * embedding_dim + 1
+        ):
             raise ValueError(
-                "Expert 2 feature_dim must be five times a positive shared audio/text "
-                "embedding width"
+                "Expert 2 feature_dim must equal 4 times a positive shared audio/text "
+                "embedding width plus one cosine scalar"
             )
 
         super().__init__(feature_dim=feature_dim)

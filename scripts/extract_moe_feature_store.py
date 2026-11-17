@@ -55,15 +55,15 @@ _PAIRED_CROSS_EXPERTS = frozenset(
     {"expert1", "expert2", "top2_m2d", "top2_msclap", "top2_laion", "top2_mga"}
 )
 _PAIRED_CROSS_REPRESENTATION = {
-    "feature_representation": "paired_cross_v1",
+    "feature_representation": "paired_cross_4d_plus_1_v2",
     "feature_blocks": [
         "audio_embedding",
         "text_embedding",
         "absolute_difference_l2",
         "elementwise_product_l2",
-        "repeated_cosine_l2",
+        "cosine_l2_scalar",
     ],
-    "feature_width_multiplier": 5,
+    "feature_width_formula": "4D+1",
 }
 CHECKPOINT_FIELDS = {
     "expert1": ("pretrained_checkpoint", "finetuned_checkpoint"),

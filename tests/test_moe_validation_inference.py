@@ -91,7 +91,7 @@ class MoeValidationInferenceTests(unittest.TestCase):
                 "sample_ids": ids,
                 "wave_file_names": [f"{sample_id}.wav" for sample_id in ids],
                 "scores": scores,
-                "features": torch.zeros(2, 12544),
+                "features": torch.zeros(2, 11010),
                 "labels_raw": target_raw,
                 "labels_scale": "raw_0_to_10",
             })
@@ -112,7 +112,7 @@ class MoeValidationInferenceTests(unittest.TestCase):
             "sample_ids": ["test:a.wav", "test:b.wav"],
             "wave_file_names": ["a.wav", "b.wav"],
             "scores": torch.tensor([[0.2, 0.3, 0.4, 0.5], [0.7, 0.6, 0.4, 0.2]]),
-            "features": torch.randn(2, 12544),
+            "features": torch.randn(2, 11010),
         }
 
         rows = evaluator.predict([batch])
@@ -133,7 +133,7 @@ class MoeValidationInferenceTests(unittest.TestCase):
                 "sample_ids": ["validation:a", "validation:b"],
                 "wave_file_names": ["a.wav", "b.wav"],
                 "scores": torch.tensor([[0.1, 0.2, 0.3, 0.4], [0.4, 0.3, 0.2, 0.1]]),
-            "features": torch.randn(2, 12544),
+            "features": torch.randn(2, 11010),
                 "labels_raw": torch.tensor([2.0, 8.0]),
                 "labels_scale": "raw_0_to_10",
             }]
@@ -152,7 +152,7 @@ class MoeValidationInferenceTests(unittest.TestCase):
             "sample_ids": ["validation:one"],
             "wave_file_names": ["one.wav"],
             "scores": torch.zeros(1, 4),
-            "features": torch.zeros(1, 12544),
+            "features": torch.zeros(1, 11010),
             "labels_raw": torch.tensor([5.0]),
             "labels_scale": "raw_0_to_10",
         }
@@ -170,7 +170,7 @@ class MoeValidationInferenceTests(unittest.TestCase):
             "sample_ids": ["validation:a", "validation:b"],
             "wave_file_names": ["a.wav", "b.wav"],
             "scores": torch.zeros(2, 4),
-            "features": torch.zeros(2, 12544),
+            "features": torch.zeros(2, 11010),
             "labels_raw": torch.tensor([2.0, 8.0]),
             "labels_scale": "raw_0_to_10",
             "num_class": torch.tensor([2, 3], dtype=torch.int64),

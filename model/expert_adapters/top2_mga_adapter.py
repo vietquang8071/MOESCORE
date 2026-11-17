@@ -139,7 +139,7 @@ class Top2MGAAdapter(ExpertAdapter):
             )
         if type(embedding_dim) is not int or embedding_dim <= 0:
             raise ValueError(f"{_ADAPTER_NAME} cannot determine the ASE projection width")
-        super().__init__(feature_dim=5 * embedding_dim)
+        super().__init__(feature_dim=4 * embedding_dim + 1)
         self.embedding_dim = embedding_dim
         self.sample_rate = sample_rate
         self.model = model

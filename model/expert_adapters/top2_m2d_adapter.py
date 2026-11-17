@@ -89,7 +89,7 @@ class Top2M2DAdapter(ExpertAdapter):
                 f"{_ADAPTER_NAME} cannot determine the M2D-CLAP embedding width; "
                 "restore the source checkpoint or provide a trusted embedding_dim"
             )
-        super().__init__(feature_dim=5 * embedding_dim)
+        super().__init__(feature_dim=4 * embedding_dim + 1)
         self.embedding_dim = embedding_dim
         self.model = model
         self._freeze_model()

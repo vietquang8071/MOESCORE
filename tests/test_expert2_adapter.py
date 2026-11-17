@@ -173,8 +173,8 @@ class Expert2AdapterForwardTests(unittest.TestCase):
                 self.assertTrue(torch.equal(score, expected_score))
                 self.assertTrue(torch.equal(features, expected_features))
                 self.assertEqual(tuple(score.shape), (batch_size, 1))
-                self.assertEqual(tuple(features.shape), (batch_size, 25))
-                self.assertEqual(adapter.feature_dim, 25)
+                self.assertEqual(tuple(features.shape), (batch_size, 21))
+                self.assertEqual(adapter.feature_dim, 21)
                 self.assertEqual(model.calls, 1)
                 self.assertIs(model.last_batch["mga_wavs"], batch["expert2_wavs"])
                 self.assertEqual(
@@ -188,7 +188,7 @@ class Expert2AdapterForwardTests(unittest.TestCase):
         for dimension in (3, 7):
             with self.subTest(dimension=dimension):
                 adapter = Expert2Adapter(DummyExpert2(embedding_dim=dimension))
-                self.assertEqual(adapter.feature_dim, 5 * dimension)
+                self.assertEqual(adapter.feature_dim, 4 * dimension + 1)
 
     def test_rejects_explicit_feature_width_that_disagrees_with_model(self):
         with self.assertRaisesRegex(ValueError, "feature_dim.*metadata"):
@@ -511,7 +511,7 @@ class Expert2AdapterFactoryTests(unittest.TestCase):
             }
             with self._factory_patch():
                 adapter = Expert2Adapter.from_config(config)
-            self.assertEqual(adapter.feature_dim, 20)
+            self.assertEqual(adapter.feature_dim, 17)
             config["experts"]["expert2"]["finetuned_checkpoint"] = paths[4].parent / "missing.pt"
             with self._factory_patch() as factory:
                 with self.assertRaisesRegex(FileNotFoundError, "fine-tuned"):

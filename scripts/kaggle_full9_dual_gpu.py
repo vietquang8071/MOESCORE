@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from data.moe_feature_store import _atomic_json, validate_feature_store
-from model.expert_adapters.registry import EXPERT_PROFILES
+from model.expert_adapters.registry import EXPERT_PROFILES, profile_contract
 from scripts.extract_moe_feature_store import (
     assembly_store_root, assemble_stores, completed_stores_match, job_identity,
     prepare_job,
@@ -160,7 +160,8 @@ def extract_dual_gpu(config_path, dataset_root, output_root, *, worker_devices=N
         assemble_stores(job, manifests, output_root)
         splits = {split: validate_feature_store(final_root, split=split, require_labels=split != "test")
                   for split in ("train", "validation", "test")}
-        if any(value["feature_width"] != 32257 or len(value["expert_order"]) != 9 for value in splits.values()):
+        expected_width = profile_contract("full_9")[2]
+        if any(value["feature_width"] != expected_width or len(value["expert_order"]) != 9 for value in splits.values()):
             raise ValueError("Assembled full_9 store has an invalid feature or score contract")
     except BaseException as exc:
         _atomic_json(log_root / "stage.json", {"status": "FAIL", "error": f"{type(exc).__name__}: {exc}"})

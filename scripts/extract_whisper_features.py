@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -50,6 +51,36 @@ def _resolve_optional_path(value: Any, *, base: Path) -> Any:
     return str(candidate)
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _cache_preprocessing_identity(extractor: Any, *, batch_size: int) -> dict[str, Any]:
+    model = extractor.model
+    first_parameter = next(model.parameters(), None)
+    return {
+        **extractor.preprocessing_identity,
+        "unified_waveform_preprocessing": {
+            "source": "data/unified_dataset.py:UnifiedXACLEDataset._expert3_audio",
+            "source_sha256": _sha256_file(PROJECT_ROOT / "data/unified_dataset.py"),
+            "mono": "mean over channels",
+            "resampling": "scipy.signal.resample_poly to 16000 Hz when needed",
+            "truncation": "first 160000 samples",
+            "padding": "constant zero to 160000 samples",
+        },
+        "collation_source_sha256": _sha256_file(PROJECT_ROOT / "data/unified_collate.py"),
+        "extraction_batch_size": batch_size,
+        "inference_device": str(extractor.device),
+        "model_parameter_dtype": str(first_parameter.dtype) if first_parameter is not None else "unknown",
+        "batch_order": "stable dataset row order",
+        "decoder_padding_scope": "per extraction batch; padded positions participate in mean pooling",
+    }
+
+
 def _load_config(path: Path) -> dict[str, Any]:
     try:
         import yaml
@@ -91,12 +122,15 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         section["model_name_or_path"] = _resolve_optional_path(model_reference, base=PROJECT_ROOT)
 
     try:
-        import torch
         from torch.utils.data import DataLoader, Subset
         from data.unified_collate import collate_unified
         from data.unified_dataset import UnifiedXACLEDataset
         from model.feature_extractors import WhisperTop2FeatureExtractor
-        from data.whisper_feature_cache import WhisperFeatureCacheWriter
+        from data.whisper_feature_cache import (
+            WhisperFeatureCacheWriter,
+            build_whisper_dataset_identity,
+            validate_whisper_cache_resume,
+        )
     except ImportError as exc:
         raise RuntimeError(f"Whisper extraction dependencies are unavailable: {exc}") from exc
 
@@ -110,6 +144,14 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     selected_indices = list(range(len(dataset)))
     if sample_limit is not None:
         selected_indices = selected_indices[:sample_limit]
+        if (
+            not args.smoke_test
+            and sample_limit < len(dataset)
+            and sample_limit % args.batch_size != 0
+        ):
+            raise ValueError(
+                "--limit-samples must end on an extraction batch boundary; use --smoke-test for one item"
+            )
 
     extractor = WhisperTop2FeatureExtractor.from_config(config)
     try:
@@ -137,24 +179,25 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             return result
 
         cache_path = Path(args.output_dir).expanduser().resolve(strict=False) / args.split
+        dataset_identity = build_whisper_dataset_identity(dataset.rows, split=args.split)
+        preprocessing_identity = _cache_preprocessing_identity(
+            extractor, batch_size=args.batch_size
+        )
         cache = WhisperFeatureCacheWriter(
             cache_path,
             split=args.split,
             source_checkpoint_identity=extractor.checkpoint_identity,
-            preprocessing_identity=extractor.preprocessing_identity,
+            preprocessing_identity=preprocessing_identity,
+            dataset_identity=dataset_identity,
             feature_extraction_version=extractor.feature_extraction_version,
         )
-        cached_ids = set(cache.sample_ids)
-        dataset_ids = {row["sample_id"] for row in dataset.rows}
-        stale_ids = cached_ids - dataset_ids
-        if stale_ids:
-            raise ValueError(
-                "Whisper cache contains sample IDs absent from the current split metadata: "
-                f"{sorted(stale_ids)[:3]}"
-            )
-        missing_indices = [
-            index for index in selected_indices if dataset.rows[index]["sample_id"] not in cached_ids
-        ]
+        dataset_ids = [row["sample_id"] for row in dataset.rows]
+        start_index = validate_whisper_cache_resume(
+            dataset_ids,
+            cache.sample_ids,
+            batch_size=args.batch_size,
+        )
+        missing_indices = selected_indices[start_index:] if start_index < len(selected_indices) else []
         loader = DataLoader(
             Subset(dataset, missing_indices),
             batch_size=args.batch_size,
@@ -165,19 +208,9 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         newly_extracted = 0
         for batch in loader:
             sample_ids = batch["sample_ids"]
-            pending = [index for index, sample_id in enumerate(sample_ids) if sample_id not in cached_ids]
-            if not pending:
-                continue
-            index = torch.tensor(pending, dtype=torch.long)
-            pending_batch = {
-                "expert3_wavs": batch["expert3_wavs"].index_select(0, index),
-                "captions_raw": [batch["captions_raw"][row] for row in pending],
-            }
-            audio_features, text_features = extractor(pending_batch)
-            pending_ids = [sample_ids[row] for row in pending]
-            cache.append(pending_ids, audio_features, text_features)
-            cached_ids.update(pending_ids)
-            newly_extracted += len(pending_ids)
+            audio_features, text_features = extractor(batch)
+            cache.append(sample_ids, audio_features, text_features)
+            newly_extracted += len(sample_ids)
 
         result = {
             "status": "PASS",

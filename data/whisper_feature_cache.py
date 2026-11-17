@@ -54,6 +54,81 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def build_whisper_dataset_identity(records: Sequence[Mapping[str, Any]], *, split: str) -> dict[str, Any]:
+    """Fingerprint ordered sample IDs, exact captions and source audio bytes.
+
+    Audio hashing is done before cache reuse so a reused filename cannot hide
+    changed audio. Caption hashes preserve whitespace and row order.
+    """
+    if split not in _SPLITS:
+        raise ValueError(f"split must be one of {sorted(_SPLITS)}; got {split!r}")
+    if isinstance(records, (str, bytes)) or not isinstance(records, Sequence) or not records:
+        raise ValueError("dataset records must be a non-empty ordered sequence")
+    seen: set[str] = set()
+    digest = hashlib.sha256()
+    for index, record in enumerate(records):
+        if not isinstance(record, Mapping):
+            raise TypeError(f"dataset record {index} must be a mapping")
+        sample_id = record.get("sample_id")
+        caption = record.get("captions_raw")
+        audio_path = record.get("audio_path")
+        record_split = record.get("split", split)
+        if not isinstance(sample_id, str) or not sample_id:
+            raise ValueError(f"dataset record {index} has an invalid sample_id")
+        if not sample_id.startswith(f"{split}:"):
+            raise ValueError(f"dataset sample ID must begin with the selected split {split!r}: {sample_id!r}")
+        if sample_id in seen:
+            raise ValueError(f"duplicate sample ID in Whisper dataset identity: {sample_id}")
+        if record_split != split:
+            raise ValueError(f"dataset record {sample_id} belongs to split {record_split!r}, expected {split!r}")
+        if not isinstance(caption, str) or not caption.strip():
+            raise ValueError(f"dataset record {sample_id} has an empty raw caption")
+        if not isinstance(audio_path, (str, os.PathLike)):
+            raise TypeError(f"dataset record {sample_id} has an invalid audio_path")
+        path = Path(audio_path).expanduser().resolve(strict=True)
+        if not path.is_file() or not os.access(path, os.R_OK):
+            raise FileNotFoundError(f"dataset audio is missing or unreadable: {path}")
+        seen.add(sample_id)
+        row_identity = {
+            "sample_id": sample_id,
+            "caption_sha256": hashlib.sha256(caption.encode("utf-8")).hexdigest(),
+            "audio_sha256": _sha256_file(path),
+        }
+        digest.update(_canonical_json(row_identity))
+        digest.update(b"\n")
+    return {
+        "split": split,
+        "sample_count": len(records),
+        "ordered_samples_sha256": digest.hexdigest(),
+    }
+
+
+def validate_whisper_cache_resume(
+    dataset_sample_ids: Sequence[str],
+    cached_sample_ids: Sequence[str],
+    *,
+    batch_size: int,
+) -> int:
+    """Require cached IDs to be a whole-batch prefix of dataset row order."""
+    if type(batch_size) is not int or batch_size <= 0:
+        raise ValueError("batch_size must be a positive integer")
+    for name, values in (("dataset_sample_ids", dataset_sample_ids), ("cached_sample_ids", cached_sample_ids)):
+        if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+            raise TypeError(f"{name} must be a sequence of sample IDs")
+        if any(not isinstance(value, str) or not value for value in values):
+            raise ValueError(f"{name} must contain non-empty strings")
+        if len(values) != len(set(values)):
+            raise ValueError(f"duplicate sample IDs in {name}")
+    cached_count = len(cached_sample_ids)
+    if cached_count > len(dataset_sample_ids) or list(cached_sample_ids) != list(dataset_sample_ids[:cached_count]):
+        raise ValueError("Whisper cache sample IDs must be an ordered prefix of current split metadata")
+    if cached_count < len(dataset_sample_ids) and cached_count % batch_size != 0:
+        raise ValueError(
+            "Whisper cache is not on an extraction batch boundary; original decoder padding context is unavailable"
+        )
+    return cached_count
+
+
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
@@ -124,6 +199,7 @@ class WhisperFeatureCacheWriter:
         split: str,
         source_checkpoint_identity: Mapping[str, Any],
         preprocessing_identity: Mapping[str, Any],
+        dataset_identity: Mapping[str, Any],
         feature_extraction_version: str = FEATURE_EXTRACTION_VERSION,
     ) -> None:
         if split not in _SPLITS:
@@ -140,6 +216,20 @@ class WhisperFeatureCacheWriter:
         self.preprocessing_identity = _identity_mapping(
             preprocessing_identity, name="preprocessing_identity"
         )
+        self.dataset_identity = _identity_mapping(dataset_identity, name="dataset_identity")
+        if set(self.dataset_identity) != {"split", "sample_count", "ordered_samples_sha256"}:
+            raise ValueError("dataset_identity must contain split, sample_count, and ordered_samples_sha256")
+        if self.dataset_identity["split"] != split:
+            raise ValueError("dataset identity split mismatch")
+        if type(self.dataset_identity["sample_count"]) is not int or self.dataset_identity["sample_count"] <= 0:
+            raise ValueError("dataset_identity.sample_count must be a positive integer")
+        dataset_digest = self.dataset_identity["ordered_samples_sha256"]
+        if not isinstance(dataset_digest, str) or len(dataset_digest) != 64:
+            raise ValueError("dataset_identity.ordered_samples_sha256 must be a SHA-256 digest")
+        try:
+            int(dataset_digest, 16)
+        except ValueError as exc:
+            raise ValueError("dataset_identity.ordered_samples_sha256 must be hexadecimal") from exc
         self.feature_extraction_version = feature_extraction_version
         self._manifest = self._identity_header()
         self._sample_ids: list[str] = []
@@ -155,6 +245,7 @@ class WhisperFeatureCacheWriter:
             "split": self.split,
             "source_checkpoint_identity": self.source_checkpoint_identity,
             "preprocessing_identity": self.preprocessing_identity,
+            "dataset_identity": self.dataset_identity,
             "feature_extraction_version": self.feature_extraction_version,
             "feature_dimensions": FEATURE_DIMENSIONS,
             "shards": [],
@@ -180,6 +271,7 @@ class WhisperFeatureCacheWriter:
             "split",
             "source_checkpoint_identity",
             "preprocessing_identity",
+            "dataset_identity",
             "feature_extraction_version",
             "feature_dimensions",
             "shards",
@@ -198,6 +290,8 @@ class WhisperFeatureCacheWriter:
             raise ValueError("Whisper cache source checkpoint identity mismatch")
         if stored.get("preprocessing_identity") != self.preprocessing_identity:
             raise ValueError("Whisper cache preprocessing identity mismatch")
+        if stored.get("dataset_identity") != self.dataset_identity:
+            raise ValueError("Whisper cache dataset identity mismatch")
         if stored.get("feature_extraction_version") != self.feature_extraction_version:
             raise ValueError("Whisper cache feature extraction version mismatch")
         if stored.get("feature_dimensions") != FEATURE_DIMENSIONS:
@@ -283,8 +377,12 @@ class WhisperFeatureCacheWriter:
         ids = list(sample_ids)
         if any(not isinstance(sample_id, str) or not sample_id for sample_id in ids):
             raise ValueError("sample_ids must contain non-empty strings")
+        if any(not sample_id.startswith(f"{self.split}:") for sample_id in ids):
+            raise ValueError(f"sample IDs in a {self.split!r} cache must use the same split prefix")
         if len(ids) != len(set(ids)):
             raise ValueError("duplicate sample IDs within Whisper cache append batch")
+        if len(self._sample_ids) + len(ids) > self.dataset_identity["sample_count"]:
+            raise ValueError("Whisper cache append exceeds the dataset identity sample count")
         duplicate = set(ids).intersection(self._sample_ids)
         if duplicate:
             raise ValueError(f"duplicate sample IDs already exist in Whisper cache: {sorted(duplicate)[:3]}")
@@ -342,4 +440,6 @@ __all__ = [
     "FEATURE_DIMENSIONS",
     "FEATURE_EXTRACTION_VERSION",
     "WhisperFeatureCacheWriter",
+    "build_whisper_dataset_identity",
+    "validate_whisper_cache_resume",
 ]

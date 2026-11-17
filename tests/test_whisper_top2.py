@@ -9,7 +9,10 @@ from torch import nn
 
 from model.feature_extractors.whisper_top2 import (
     FEATURE_EXTRACTION_VERSION,
+    MODEL_ID,
     WhisperTop2FeatureExtractor,
+    _checkpoint_identity,
+    _local_model_files,
 )
 
 
@@ -82,6 +85,21 @@ def batch(size=1):
         "expert3_wavs": torch.zeros(size, 1, 160_000, dtype=torch.float32),
         "captions_raw": [" rain " if index == 0 else "engine in distance" for index in range(size)],
     }
+
+
+def write_local_snapshot(directory, *, model_id=MODEL_ID):
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "config.json").write_text(
+        json.dumps({"_name_or_path": model_id, "model_type": "whisper", "d_model": 1280}),
+        encoding="utf-8",
+    )
+    (directory / "preprocessor_config.json").write_text(
+        json.dumps({"feature_size": 80, "sampling_rate": 16_000}), encoding="utf-8"
+    )
+    (directory / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    (directory / "vocab.json").write_text("{}", encoding="utf-8")
+    (directory / "merges.txt").write_text("#version: 0.2\n", encoding="utf-8")
+    (directory / "model.safetensors").write_bytes(b"synthetic checkpoint marker")
 
 
 def test_outputs_match_original_unmasked_sequence_means_and_exact_calls():
@@ -257,6 +275,51 @@ def test_rejects_incomplete_local_checkpoint_before_loading(tmp_path, monkeypatc
                 "whisper_top2": {"model_name_or_path": str(model_dir)},
             }
         )
+
+
+def test_local_large_v2_named_ancestor_cannot_override_explicit_large_v1_identity(tmp_path):
+    wrong_variant = tmp_path / "whisper-large-v2" / "renamed-model"
+    write_local_snapshot(wrong_variant, model_id="openai/whisper-large-v1")
+    with pytest.raises(ValueError, match="different Whisper variant"):
+        _local_model_files(wrong_variant)
+
+
+def test_huggingface_snapshot_symlink_fingerprints_snapshot_not_blobs(tmp_path, monkeypatch):
+    repo_root = tmp_path / "models--openai--whisper-large-v2"
+    blob_root = repo_root / "blobs"
+    snapshot = repo_root / "snapshots" / "commit-123"
+    blob_root.mkdir(parents=True)
+    snapshot.mkdir(parents=True)
+    source_files = {
+        "config.json": json.dumps({"_name_or_path": MODEL_ID, "model_type": "whisper", "d_model": 1280}),
+        "preprocessor_config.json": json.dumps({"feature_size": 80, "sampling_rate": 16_000}),
+        "tokenizer_config.json": "{}",
+        "vocab.json": "{}",
+        "merges.txt": "#version: 0.2\n",
+        "model.safetensors": "synthetic checkpoint marker",
+    }
+    for name, content in source_files.items():
+        blob = blob_root / f"blob-{name}"
+        blob.write_text(content, encoding="utf-8")
+        (snapshot / name).symlink_to(blob)
+
+    hub_calls = []
+
+    def try_to_load_from_cache(repo_id, filename, *, cache_dir=None, revision=None):
+        hub_calls.append((repo_id, filename, cache_dir, revision))
+        return str(snapshot / filename) if filename == "config.json" else None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(try_to_load_from_cache=try_to_load_from_cache),
+    )
+
+    identity = _checkpoint_identity(MODEL_ID, cache_dir=tmp_path / "hf-cache", revision="commit-123")
+
+    assert identity["model_id"] == MODEL_ID
+    assert "model.safetensors" in identity["files"]
+    assert hub_calls == [(MODEL_ID, "config.json", str(tmp_path / "hf-cache"), "commit-123")]
 
 
 def test_rejects_alternative_whisper_variant_before_loading():

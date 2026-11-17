@@ -84,11 +84,15 @@ def _local_model_files(directory: Path) -> list[Path]:
         raise ValueError(f"Whisper-large-v2 checkpoint has unreadable configuration: {directory}") from exc
     if model_config.get("model_type") != "whisper" or model_config.get("d_model") != HIDDEN_SIZE:
         raise ValueError("local checkpoint is not Whisper-large-v2 compatible (expected Whisper d_model=1280)")
-    variant_markers = {str(part).lower() for part in directory.parts}
-    variant_markers.add(str(model_config.get("_name_or_path", "")).lower())
-    if not any("whisper-large-v2" in marker or marker == MODEL_ID for marker in variant_markers):
+    declared_identity = model_config.get("_name_or_path")
+    declared_identity = declared_identity.lower() if isinstance(declared_identity, str) else ""
+    if "whisper-" in declared_identity and "whisper-large-v2" not in declared_identity:
         raise ValueError(
-            "local checkpoint does not identify itself as openai/whisper-large-v2; refusing a variant substitution"
+            f"local checkpoint explicitly identifies a different Whisper variant: {declared_identity!r}"
+        )
+    if "whisper-large-v2" not in declared_identity:
+        raise ValueError(
+            "local checkpoint config must identify openai/whisper-large-v2; refusing an unverified variant"
         )
     if preprocessor_config.get("feature_size") != MEL_BINS:
         raise ValueError("local Whisper feature extractor must use 80 Mel bins")
@@ -102,9 +106,10 @@ def _local_model_files(directory: Path) -> list[Path]:
             raise FileNotFoundError(f"Whisper-large-v2 checkpoint is missing {required.name}: {directory}")
 
     files = [config_path, preprocessor_path, tokenizer_config_path, vocab_path, merges_path]
-    tokenizer_json = directory / "tokenizer.json"
-    if tokenizer_json.is_file():
-        files.append(tokenizer_json)
+    for optional_tokenizer_asset in ("tokenizer.json", "special_tokens_map.json", "added_tokens.json"):
+        optional_path = directory / optional_tokenizer_asset
+        if optional_path.is_file():
+            files.append(optional_path)
 
     weight_files: list[Path] = []
     for standalone in ("model.safetensors", "pytorch_model.bin"):
@@ -132,7 +137,12 @@ def _local_model_files(directory: Path) -> list[Path]:
     return sorted(set(files))
 
 
-def _checkpoint_identity(model_name_or_path: str, *, cache_dir: Any = None) -> dict[str, Any]:
+def _checkpoint_identity(
+    model_name_or_path: str,
+    *,
+    cache_dir: Any = None,
+    revision: Optional[str] = None,
+) -> dict[str, Any]:
     reference = Path(model_name_or_path).expanduser()
     if reference.exists():
         directory = reference.resolve(strict=True)
@@ -143,18 +153,21 @@ def _checkpoint_identity(model_name_or_path: str, *, cache_dir: Any = None) -> d
             from huggingface_hub import try_to_load_from_cache
         except ImportError as exc:
             raise RuntimeError("huggingface_hub is required to identify the cached Whisper checkpoint") from exc
-        config_file = try_to_load_from_cache(
-            MODEL_ID,
-            "config.json",
-            cache_dir=None if cache_dir is None else str(cache_dir),
-        )
+        cache_options: dict[str, Any] = {
+            "cache_dir": None if cache_dir is None else str(cache_dir),
+        }
+        if revision is not None:
+            cache_options["revision"] = revision
+        config_file = try_to_load_from_cache(MODEL_ID, "config.json", **cache_options)
         if not isinstance(config_file, str) or not Path(config_file).is_file():
             raise RuntimeError(
                 "could not resolve the loaded Whisper-large-v2 snapshot locally to fingerprint its checkpoint"
             )
-        directory = Path(config_file).resolve(strict=True).parent
+        # Keep the snapshot symlink path: resolving the file first moves into
+        # Hugging Face's blobs/ directory, which has no snapshot filenames.
+        directory = Path(config_file).expanduser().absolute().parent
 
-    files = _local_model_files(directory)
+    files = _local_model_files(directory.resolve(strict=True))
     return {
         "model_id": MODEL_ID,
         "files": {path.name: _sha256_file(path) for path in files},
@@ -279,6 +292,7 @@ class WhisperTop2FeatureExtractor(nn.Module):
             preprocessing_identity or _PREPROCESSING_IDENTITY,
             field="preprocessing_identity",
         )
+        self.eval()
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, device: Any = None) -> "WhisperTop2FeatureExtractor":
@@ -329,7 +343,11 @@ class WhisperTop2FeatureExtractor(nn.Module):
             raise ValueError(
                 f"loaded checkpoint is not Whisper-large-v2 compatible: model_type={model_type!r}, d_model={model_width!r}"
             )
-        checkpoint_identity = _checkpoint_identity(model_name_or_path, cache_dir=cache_dir)
+        checkpoint_identity = _checkpoint_identity(
+            model_name_or_path,
+            cache_dir=cache_dir,
+            revision=getattr(model_config, "_commit_hash", None),
+        )
         preprocessing_identity = {
             **_PREPROCESSING_IDENTITY,
             "feature_extraction_version": FEATURE_EXTRACTION_VERSION,
@@ -392,8 +410,12 @@ class WhisperTop2FeatureExtractor(nn.Module):
             )
             encoder_hidden = getattr(outputs, "encoder_last_hidden_state", None)
             decoder_hidden = getattr(outputs, "last_hidden_state", None)
-            audio_features = self._pool_hidden(encoder_hidden, "encoder", waveforms.shape[0])
-            text_features = self._pool_hidden(decoder_hidden, "decoder", waveforms.shape[0])
+            audio_features = self._pool_hidden(
+                encoder_hidden, label="encoder", batch_size=waveforms.shape[0]
+            )
+            text_features = self._pool_hidden(
+                decoder_hidden, label="decoder", batch_size=waveforms.shape[0]
+            )
             audio_features = audio_features.to(device=self.device, dtype=torch.float32)
             text_features = text_features.to(device=self.device, dtype=torch.float32)
             if not torch.isfinite(audio_features).all().item():

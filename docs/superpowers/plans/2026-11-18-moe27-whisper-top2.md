@@ -42,9 +42,9 @@
 - Produces: `WhisperTop2FeatureExtractor.from_config(mapping)` and callable output `(audio[B,1280], text[B,1280])`; expose checkpoint and preprocessing identities.
 
 - [x] Write mock tests for input validation, exact preprocessing/tokenizer/model calls, mean pooling, frozen/eval state, deterministic outputs, and offline loading.
-- [ ] Run the tests; collection is blocked by missing PyTorch (`ModuleNotFoundError: torch`).
+- [x] Run the tests in conda `nlp`: extractor tests pass as part of 26 passing Whisper tests.
 - [x] Implement the wrapper and loading/resource validation.
-- [ ] Extractor test execution remains blocked; focused Python syntax check passes.
+- [x] Extractor tests pass with the mock model; real checkpoint verification is unavailable.
 
 ### Task 2: Dedicated split-aware feature cache
 
@@ -57,9 +57,9 @@
 - Produces: `WhisperFeatureCacheWriter.append`, `.sample_ids`, `.load`; arrays are CPU NumPy float32 with width 1280 each.
 
 - [x] Write tests for identity validation, duplicate IDs, finite features, atomic shard/manifest save and load, and split separation.
-- [ ] No pre-implementation RED result was recorded; the initial system pytest command could not start because pytest was absent, and the cached Python 3.12 runner was discovered after implementation.
+- [x] No pre-implementation RED result was recorded; the initial system pytest command could not start because pytest was absent, and the cached Python 3.12 runner was discovered after implementation.
 - [x] Implement atomic NPZ shards and checksummed JSON metadata.
-- [x] Run cache tests (8 passed) and syntax checks.
+- [x] Run Whisper extractor/cache tests together (26 passed) and syntax checks in conda `nlp`.
 
 ### Task 3: Extraction CLI, example config, and implementation report
 
@@ -81,7 +81,7 @@
 **Files:**
 - Review only: Whisper-owned files from Tasks 1–3.
 
-- [x] Run new tests, relevant existing tests, and the repository suite where runtime dependencies permit; cache tests and one existing test pass, full collection stops on missing PyTorch.
+- [x] Run new tests, relevant existing tests, and repository suite in conda `nlp`: Whisper tests 26 passed, existing Kaggle dependency tests 4 passed; full suite 394 passed, 28 failed, 1 skipped (failures are in unrelated tests with missing import roots/assets).
 - [x] Check local resources; exact Whisper-large-v2 weights and runtime dependencies are absent, so bounded real-model parity cannot run.
-- [ ] Review the diff and stage only Whisper-related files.
-- [ ] Commit on `dev/moe27-whisper` with `feat(whisper): port Top2 Whisper feature extractor for E6`.
+- [x] Review the diff and stage only Whisper-related files.
+- [x] Commit implementation on `dev/moe27-whisper`; follow-up fixes are committed separately.

@@ -15,6 +15,7 @@ from torch import nn
 from model.expert_adapters.expert3_adapter import (
     Expert3Adapter,
     Expert3CheckpointError,
+    _offline_transformer_environment,
     validate_expert3_module_origin,
 )
 
@@ -164,6 +165,19 @@ class FactoryStubExpert(nn.Module):
 
     def forward(self, batch):
         raise NotImplementedError
+
+
+class Expert3OfflineCacheTests(unittest.TestCase):
+    def test_offline_environment_maps_cache_root_to_hub_snapshot_directory_and_restores(self):
+        names = ("HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_DATASETS_OFFLINE")
+        initial = {name: f"previous-{name}" for name in names}
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(os.environ, initial, clear=True):
+            root = Path(temporary)
+            with _offline_transformer_environment(root):
+                self.assertEqual(os.environ["HF_HOME"], str(root))
+                self.assertEqual(os.environ["HF_HUB_CACHE"], str(root / "hub"))
+                self.assertEqual(os.environ["HF_HUB_OFFLINE"], "1")
+            self.assertEqual({name: os.environ[name] for name in names}, initial)
 
 
 class Expert3AdapterForwardTests(unittest.TestCase):

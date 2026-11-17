@@ -549,7 +549,9 @@ class BertXEncoder(torch.nn.Module):
         import os
         os.environ["TOKENIZERS_PARALLELISM"] = "true"  # To suppress warnings.
 
-        cache_dir = os.environ.get("HF_HOME")
+        cache_dir = os.environ.get("HF_HUB_CACHE") or (
+            os.path.join(os.environ["HF_HOME"], "hub") if os.environ.get("HF_HOME") else None
+        )
         self.tokenizer = AutoTokenizer.from_pretrained(clip_weight, cache_dir=cache_dir)
         self.text_encoder = AutoModel.from_pretrained(clip_weight, cache_dir=cache_dir)
 

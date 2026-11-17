@@ -1,0 +1,6 @@
+{
+  "error": "MoeConfigError: Unable to load YAML config /path/to/moe_full9.yaml: [Errno 2] No such file or directory: '/path/to/moe_full9.yaml'",
+  "expert": null,
+  "resume": "Validated completed shards are retained",
+  "status": "FAIL"
+}

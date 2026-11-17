@@ -35,7 +35,7 @@ Checkpoint `top1_4` schema-v1 vẫn được chấp nhận nếu width là 12544
 
 `configs/moe_full9.example.yaml` dùng đúng tên field của từng factory. Cần thay `expert4.unilm_source_dir`, đường dẫn dataset và HF cache theo máy chạy. Generator Kaggle nhận `profile="full_9"` và `unilm_source_dir`; preflight kiểm tra chín checkpoint, `msclap==1.3.4`, các dependency và cache text. Kiểm tra offline gồm `roberta-base`, `bert-base-uncased`, `google-bert/bert-base-uncased`, `gpt2` (bao gồm trọng số GPT-2 mà MS-CLAP nạp). `HF_HOME` và `HF_HUB_CACHE` nay trỏ đúng cấp thư mục.
 
-Trong môi trường local `/home/vitquay1708/miniconda3/envs/nlp/bin/python`, kiểm tra đường dẫn của tất cả checkpoint, YAML, dataset và UniLM nguồn độc lập **PASS** khi cấu hình các đường dẫn thực tế. Kiểm tra cache Hugging Face offline cho bốn ID trên **PASS**; `msclap` là `1.3.4`, `transformers` là `4.57.6`. CUDA không khả dụng trong lượt kiểm tra này. Chưa chạy suy luận thực đầy đủ chín expert; kết quả chín điểm và dự đoán trong test dưới đây dùng dữ liệu tổng hợp, không phải kết quả pretrained.
+Trong preflight ban đầu, kiểm tra đường dẫn checkpoint/YAML/dataset/UniLM và cache Hugging Face offline đều **PASS**; `msclap` là `1.3.4`, `transformers` là `4.57.6`. Lúc preflight CUDA chưa khả dụng. Sau đó người dùng chạy bounded extraction trên `cuda:0`; kết quả bên dưới ghi nhận lần chạy mới nhất.
 
 Preflight `prepare_job(..., profile="full_9", device="cpu", limit=1)` với checkpoint thật, cache HF thật và một bản ghi từ mỗi split XACLE 2027 **PASS**: chín expert có cache identity và mỗi split có assembly identity riêng. Bước này chỉ kiểm tra cấu hình, nội dung tệp và provenance; **không** khởi tạo model hoặc chạy audio qua expert.
 
@@ -63,4 +63,16 @@ python scripts/infer_moe_gating.py --config /path/to/moe_gating_config.yaml --ch
 
 `ASSEMBLY_ID` và `feature_store_root` được lệnh extraction in ra; đặt đúng giá trị đó trong gating config. Chạy lần đầu cần trích xuất lại những expert chưa có cache hợp lệ. Khi mở rộng từ `top1_4` sang `full_9`, cache của expert1–4 có cùng identity đầu ra có thể được tái sử dụng, còn assembly identity mới luôn khác. Việc chỉnh fingerprint tiền xử lý trong đợt này có thể làm đổi identity một lần so với cache trước đó; shard cũ được giữ và không tự đổi nhãn.
 
-Giới hạn còn lại: lượt này chưa có smoke suy luận pretrained đủ cả chín expert trên cùng một cặp audio/caption và chưa chạy Kaggle job thật. Cần thực hiện smoke bounded trên máy có GPU trước khi mở rộng trích xuất; không có checkpoint hoặc text resource local nào bị thiếu trong preflight đã chạy.
+Bounded extraction đã chạy xong; các bước huấn luyện/evaluate gate và Kaggle job thật chưa chạy. Không có checkpoint hoặc text resource local nào bị thiếu trong preflight.
+
+## Sửa lỗi cache BERT của Expert 3 sau smoke thử
+
+Lần chạy thật sau khi gỡ symlink M2D vướng `LocalEntryNotFoundError`: PortableM2D truyền `HF_HOME` làm `cache_dir`, trong khi snapshot BERT nằm ở thư mục con `HF_HOME/hub`. Expert 3 nay đặt `HF_HUB_CACHE` đúng thành thư mục `hub` trong phạm vi offline và BertXEncoder dùng đường dẫn đó. Model ID và checkpoint không đổi.
+
+Kiểm tra local `AutoConfig`/`AutoTokenizer` cho `google-bert/bert-base-uncased` với offline cache **PASS**; `test_expert3_adapter.py`: **21 test, OK, 1 skipped**; syntax và `git diff --check` đạt. Thay đổi nguồn làm identity extraction của các expert phụ thuộc PortableM2D thay đổi; lần extraction bên dưới tạo assembly identity mới. Những shard cũ được giữ nguyên.
+
+## Kết quả bounded extraction thật trên GPU
+
+Lệnh extraction trả về `status=PASS`, `smoke=true`, assembly ID `d36f2600898936c875da756afd649a44e56a91fcbd6ffbf33f1e154beddfd544` và store tại `/tmp/moe09_4_smoke/feature_cache/assemblies/full_9/d36f2600898936c875da756afd649a44e56a91fcbd6ffbf33f1e154beddfd544`.
+
+Manifest và runtime report đã được kiểm tra: cả ba split train/validation/test đều PASS với 4 mẫu mỗi split. Train và validation có nhãn; test không có nhãn. Feature store có điểm `[4,9]` và đặc trưng `[4,32257]` cho từng split. Bảy expert (`expert3`, `expert4`, `top2_m2d`, `top2_msclap`, `top2_laion`, `top2_mga`, `m2d_lora`) được khởi tạo tuần tự trên `cuda:0`, ở eval và frozen. `expert1` và `expert2` dùng lại ba shard đã xác minh cho các cache identity tương ứng. Gate chưa được train hoặc chạy trên các đầu ra thật trong lần smoke này.

@@ -156,9 +156,12 @@ def _target_device(device: DeviceValue) -> torch.device:
 @contextmanager
 def _offline_transformer_environment(cache_dir: Path):
     """Temporarily direct Hugging Face resolution to the requested local cache."""
-    names = ("HF_HOME", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_DATASETS_OFFLINE")
+    names = ("HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_DATASETS_OFFLINE")
     previous = {name: os.environ.get(name) for name in names}
     os.environ["HF_HOME"] = str(cache_dir)
+    # HF_HOME is the cache root; Transformers' explicit cache_dir must be the
+    # Hub subdirectory containing models--*/snapshots.
+    os.environ["HF_HUB_CACHE"] = str(cache_dir / "hub")
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     os.environ["HF_DATASETS_OFFLINE"] = "1"

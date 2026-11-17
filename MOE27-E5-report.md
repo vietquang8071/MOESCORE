@@ -105,7 +105,7 @@ CUDA không khả dụng nên không chạy train CUDA.
 
 ## 10. Commit
 
-Commit trên nhánh `dev/moe27-e5`: `1a3459cc4c08d2038819c574737e40a2a466e4a0` (`feat(e5): implement Set A cosine residual expert`).
+Commit triển khai trên nhánh `dev/moe27-e5`: `ac837adc7e530a0d23c208bbbfef4c135d74fe4b` (`feat(e5): implement Set A cosine residual expert`). Báo cáo ghi lại SHA commit triển khai này; bản cập nhật SHA của báo cáo nằm trong commit tài liệu tiếp theo.
 
 ## 11. Integration blockers còn lại
 

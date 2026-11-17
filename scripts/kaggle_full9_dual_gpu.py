@@ -194,7 +194,7 @@ def main(argv=None):
         worker_devices=mapping, batch_sizes=dict(zip(order, sizes)) if sizes else None,
         shard_size=args.shard_size, smoke=args.smoke)
     if args.report_json:
-        _atomic_json(args.report_json, report)
+        _atomic_json(Path(args.report_json), report)
     print(json.dumps(report, indent=2))
     return 0
 

@@ -1,0 +1,10 @@
+whisper_top2:
+  # Keep the exact Top 2 model. A local directory must be a complete
+  # Hugging Face snapshot of openai/whisper-large-v2.
+  model_name_or_path: openai/whisper-large-v2
+  sample_rate: 16000
+
+runtime:
+  device: auto
+  offline: true
+  cache_dir: .cache/huggingface

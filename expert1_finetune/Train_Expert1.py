@@ -46,23 +46,26 @@ class Expert1Dataset(Dataset):
         row = self.rows.iloc[index]
         wav_path = self.wav_dir / str(row["wav_file_name"]).lstrip("/")
         waveform, sample_rate = torchaudio.load(wav_path)
-        waveform = waveform.mean(dim=0)  # mono
+        waveform = waveform.mean(dim=0)  # chuyển về mono
+        # Resample về 48k hz với laion-clap
         if sample_rate != SAMPLE_RATE:
             waveform = torchaudio.functional.resample(
                 waveform, sample_rate, SAMPLE_RATE
             )
+        # .numel(): Lấy tổng số phần tử trong tensor, ở đây số phần tử là số sample trong 1 file audio
         if waveform.numel() == 0:
             raise ValueError(f"Empty audio file: {wav_path}")
-
+        # Nếu số sample của audio lớn hơn max_samples, thì cắt bớt đi
         if waveform.numel() > self.max_samples:
-            last_start = waveform.numel() - self.max_samples
-            start = random.randint(0, last_start) if self.training else last_start // 2
-            waveform = waveform[start : start + self.max_samples]
+            last_start = waveform.numel() - self.max_samples # Vị trí bắt đầu lớn nhất có thể chọn để cắt được đoạn audio có đủ max_samples
+            start = random.randint(0, last_start) if self.training else last_start // 2 # training: lấy điểm bắt đầu ngẫu nhiên, validate và test thì mặc định lấy ở giữa
+            waveform = waveform[start : start + self.max_samples] # audio sau khi crop
+        # Nếu số sample của audio nhỏ hơn max_samples, padding bằng cách repeat chính audio đó, phần thừa còn lại thì zero-padding
         elif waveform.numel() < self.max_samples:
-            repeats = self.max_samples // waveform.numel()
+            repeats = self.max_samples // waveform.numel() # tính số lần phải lặp
             waveform = waveform.repeat(repeats)
             waveform = nn.functional.pad(
-                waveform, (0, self.max_samples - waveform.numel())
+                waveform, (0, self.max_samples - waveform.numel()) # zero padding
             )
 
         score = float(row["average_score"])
@@ -75,12 +78,12 @@ class Expert1Dataset(Dataset):
         return {
             "clap_wav": waveform.unsqueeze(0),
             "caption": caption,
-            "score": (score - 5.0) / 5.0,
+            "score": (score - 5.0) / 5.0, # Chuẩn hóa về khoảng [-1:1]
             "score_raw": score,
             "num_class": int(row["num_class"]) if "num_class" in self.rows else 1,
         }
 
-
+# Chuyển batch thành torch tensor
 def collate_batch(items):
     return {
         "clap_wavs": torch.stack([item["clap_wav"] for item in items]),
@@ -100,6 +103,7 @@ class CLAPAudioTextEncoder(nn.Module):
 
     def __init__(self, checkpoint: Path, device: torch.device):
         super().__init__()
+        # tắt cơ chế audio feature fusion
         self.model = laion_clap.CLAP_Module(
             enable_fusion=False, device=str(device)
         )
@@ -107,9 +111,11 @@ class CLAPAudioTextEncoder(nn.Module):
 
         for parameter in self.model.parameters():
             parameter.requires_grad_(False)
+        # Mở tham số với các layer mlp và projection ở cả 2 nhánh audio và text
         for name, parameter in self.model.model.named_parameters():
             if "projection" in name or "mlp" in name:
                 parameter.requires_grad_(True)
+        # Với nhánh xử lý audio (HTSAT) mở các layer cuối cùng, các layer chứa head và norm trong tên
         for name, parameter in self.model.model.audio_branch.named_parameters():
             if any(part in name for part in ("layers.2", "layers.3", "head", "norm")):
                 parameter.requires_grad_(True)

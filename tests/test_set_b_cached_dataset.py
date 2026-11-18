@@ -18,18 +18,20 @@ from model.expert_adapters.registry import TOP2_EXPERT_INPUT_CONTRACTS, profile_
 
 
 def synthetic_caches(root: Path, *, split="train", count=2, labels=None,
-                     whisper_order=None, whisper_caption_suffix=""):
+                     whisper_order=None, whisper_caption_suffix="", filenames=None,
+                     audio_payloads=None, captions=None, laion_implementation="synthetic",
+                     laion_preprocessing="synthetic"):
     full9, whisper, audio_dir = root / "full9", root / "whisper", root / split / "wav"
     audio_dir.mkdir(parents=True, exist_ok=True)
     order, dimensions, width = profile_contract("full_9")
     records = []
     whisper_records = []
     for index in range(count):
-        name = f"{index}.wav"
+        name = filenames[index] if filenames is not None else f"{index}.wav"
         path = audio_dir / name
-        path.write_bytes(f"wave-{split}-{index}".encode())
+        path.write_bytes(audio_payloads[index] if audio_payloads is not None else f"wave-{split}-{index}".encode())
         sample_id = f"{split}:{name}"
-        caption = f"caption {index}"
+        caption = captions[index] if captions is not None else f"caption {index}"
         records.append({"sample_id": sample_id, "wave_file_name": name, "raw_caption": caption,
                         "wav_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                         **({"label_raw": (labels or [5.1] * count)[index]} if split != "test" else {})})
@@ -48,7 +50,8 @@ def synthetic_caches(root: Path, *, split="train", count=2, labels=None,
         input_contract = asdict(TOP2_EXPERT_INPUT_CONTRACTS[name]) if name in TOP2_EXPERT_INPUT_CONTRACTS else {"audio_key": "expert3_wavs", "sample_rate_hz": 16000}
         model_id = {"sha256": f"{index + 1:064x}"}
         cache_ids[name] = build_expert_cache_identity(expert_name=name, checkpoint_provenance=model_id,
-            implementation_provenance={"source": "synthetic"}, preprocessing_provenance={"policy": "synthetic"},
+            implementation_provenance={"source": laion_implementation if name == "top2_laion" else "synthetic"},
+            preprocessing_provenance={"policy": laion_preprocessing if name == "top2_laion" else "synthetic"},
             input_contract=input_contract, inference_policy={"module_mode": "eval"},
             score_contract=contract, relevant_dependencies={"torch": "test"})
         models[name] = model_id

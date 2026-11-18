@@ -16,7 +16,7 @@
 - Kiểm thử: `tests/test_set_b_residual.py`, `tests/test_set_b_cached_dataset.py`, `tests/test_set_b_training.py`.
 - Tài liệu: `docs/MOE27-E6-implementation.md`, báo cáo này.
 
-Không sửa E5, Whisper extractor, LAION adapter, Full9 legacy, registry hay Global Gating Network. Không commit/push/merge nhánh.
+Không sửa E5, Whisper extractor, LAION adapter, Full9 legacy, registry hay Global Gating Network. Đoạn này mô tả lần triển khai ban đầu; E6 đã được commit ở `ffb6c77` trước đợt sửa P1 bên dưới.
 
 ## 3. Kiến trúc và dữ liệu
 
@@ -48,4 +48,36 @@ Chọn `expert6_best.pt` theo nhãn official validation là **model selection**.
 
 Core cần tạo `SetBResidualAdapter(SetBResidualHead(...))`, nạp checkpoint E6 đã kiểm tra provenance, truyền `component_outputs.top2_laion.{score [B,1], features [B,2049]}`, `whisper_audio [B,1280]`, `whisper_text [B,1280]`, rồi ghép `(score6 [B,1], features6 [B,4609])` vào vị trí E6 của assembly/gating Full7. Nhánh E6 chưa sửa registry hay kích thước global gating.
 
-**Trạng thái cuối:** triển khai E6 và kiểm thử tổng hợp hoàn tất; chờ cache/checkpoint thật để xác minh runtime và huấn luyện official. Các tệp E6 mới còn untracked để code review; không commit.
+**Trạng thái sau lần triển khai ban đầu:** triển khai E6 và kiểm thử tổng hợp hoàn tất; chờ cache/checkpoint thật để xác minh runtime và huấn luyện official. Trạng thái Git hiện tại được cập nhật trong mục P1 bên dưới.
+
+## 8. Sửa hai lỗi P1 trước Integration (2026-11-19)
+
+### Trạng thái đầu đợt sửa
+
+Worktree `MOESCORE-E6` ở nhánh `dev/moe27-e6`, HEAD `ffb6c77 feat(e6): add Set B residual expert pipeline`. `git status --short` rỗng; `git merge-base --is-ancestor feature/xacle2027-7expert-moe HEAD` trả mã 0. Không có thay đổi cục bộ cần bảo tồn.
+
+### P1-1 — Nhất quán identity LAION
+
+`training/set_b_trainer.py` nay dùng `validate_expert_cache_identity` để xác thực identity LAION train và validation, sau đó so canonical `cache_id`. Kiểm tra này ràng buộc implementation, preprocessing, input, inference policy, score/feature contract, dependencies và checkpoint provenance. Cùng checkpoint nhưng khác implementation/preprocessing bị từ chối trước optimizer step. Khác biệt store/source manifest riêng theo split vẫn được chấp nhận.
+
+Khi nạp checkpoint cho split chưa nằm trong checkpoint (như `test`), loader yêu cầu provenance train đã lưu, xác thực cả identity LAION train và identity LAION của split suy luận, so `cache_id` trước khi nạp model parameters. Nếu thiếu, sai schema/hash hoặc khác cache, loader từ chối. Kiểm tra Whisper checkpoint/preprocessing và exact provenance đối với train/validation được giữ nguyên.
+
+### P1-2 — WAV trùng byte giữa train/validation
+
+Trainer đọc `wav_sha256` từ hai Full9 source manifest đã xác thực, chuẩn hóa hex rồi tìm giao hai tập hash bằng map/set, không so từng cặp record. Nếu cùng byte WAV xuất hiện ở hai split, trainer báo hash và cả sample ID train/validation trước khi tạo output directory hoặc chạy optimizer. Quy tắc này vẫn áp dụng khi tên file, ID và caption khác nhau. Không xóa/lọc/sắp lại dữ liệu official. Trùng byte cần được review theo thiết kế bộ dữ liệu. Audio tương đương về nội dung nhưng đã mã hóa lại có thể có SHA-256 khác và không bị phát hiện bởi phép kiểm này.
+
+### Tệp thay đổi và kiểm thử
+
+Chỉ sửa `training/set_b_trainer.py`, `tests/test_set_b_training.py`, `tests/test_set_b_cached_dataset.py`, `docs/MOE27-E6-implementation.md` và báo cáo này. Fixture tổng hợp tạo lại Full9 và Whisper manifest/cache hợp lệ với các hash identity chuẩn; không vô hiệu hóa kiểm tra hash để tạo test.
+
+Test mới gồm: cùng identity qua hai split có source/store fingerprint khác nhau; implementation hoặc preprocessing LAION khác dù cùng checkpoint; test split LAION khác; provenance LAION đã lưu bị thiếu/sai; identity inference trong RAM sai; WAV trùng với ID/tên/caption khác; không có optimizer step, không tạo output và không thay dữ liệu khi phát hiện overlap; SHA-256 không phải hex bị từ chối. Trước sửa, 7 biến thể P1 fail đúng vì thiếu kiểm tra; thêm một ca riêng cho SHA-256 không phải hex đã fail trước khi siết validation.
+
+- E6 tập trung sau sửa: **31 passed** (`tests/test_set_b_residual.py`, `tests/test_set_b_cached_dataset.py`, `tests/test_set_b_training.py`).
+- Hồi quy Full9, paired LAION, Top2, Whisper extractor/cache và E5: **77 passed**.
+- Full suite trên mã đã sửa: **458 passed, 27 failed, 1 skipped, 2 warnings** trong 76,16 giây. 27 lỗi giữ nguyên nhóm chữ ký so với báo cáo trước: test E2/E3 import tên package `MOESCORE` không có ở worktree `MOESCORE-E6`; test E4 thiếu notebook `expert4_finetune/colab/Finetune_MOESCORE_Expert4.ipynb` hoặc package `expert4_repro`. Không có lỗi E6. Full suite được chạy trước khi bổ sung một test cuối về hex viết hoa; bộ E6 đã chạy lại toàn bộ sau bổ sung này.
+
+Lệnh E6: `conda run -n nlp env PYTHONPATH=/home/vitquay1708/.cache/uv/archive-v0/UfEXJ4HVLkLakVBe/lib/python3.12/site-packages python -m pytest tests/test_set_b_residual.py tests/test_set_b_cached_dataset.py tests/test_set_b_training.py -q --tb=short`. Lệnh hồi quy dùng cùng môi trường với `tests/test_whisper_top2.py tests/test_whisper_feature_cache.py tests/test_moe_feature_store.py tests/test_paired_cross_features.py tests/test_set_a_residual.py tests/test_set_a_training.py tests/test_top2_adapters.py`. Full suite dùng `python -m pytest -q --tb=short` trong cùng môi trường.
+
+Không chạy dữ liệu thật, không tải backbone, không commit/push/merge trong đợt sửa P1. Việc xác minh với cache thực vẫn **NOT VERIFIED**; caveat về official validation checkpoint selection và pretrained disclosure ở mục 6 vẫn còn hiệu lực.
+
+Trạng thái Git cuối đợt sửa: `dev/moe27-e6` đồng bộ với `origin/dev/moe27-e6`; đúng 5 tệp E6 nêu trên đã sửa nhưng chưa stage, không có tệp mới và không có commit mới. `git diff --check` trả mã 0.

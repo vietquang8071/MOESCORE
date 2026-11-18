@@ -7,12 +7,14 @@ import math
 import os
 from pathlib import Path
 import random
+import re
 import tempfile
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+from data.moe_expert_cache import validate_expert_cache_identity
 from data.set_b_cached_dataset import SetBCachedDataset
 from model.composite_experts.set_b_residual import feature_order_contract
 from model.expert_adapters.set_b_residual_adapter import SetBResidualAdapter
@@ -63,6 +65,31 @@ def _atomic_save(payload, path):
         Path(name).unlink(missing_ok=True)
 
 
+def _laion_cache_id(identity, *, context):
+    try:
+        cache_id = validate_expert_cache_identity(identity)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"E6 {context} LAION cache identity is missing or invalid: {exc}") from exc
+    if identity["expert_name"] != "top2_laion":
+        raise ValueError(f"E6 {context} LAION cache identity names a different expert")
+    return cache_id
+
+
+def _source_audio_ids(records, *, split):
+    by_hash = {}
+    for record in records:
+        if not isinstance(record, dict):
+            raise ValueError(f"E6 {split} source audio record is invalid")
+        digest = record.get("wav_sha256")
+        sample_id = record.get("sample_id")
+        if not isinstance(digest, str) or len(digest) != 64 or not isinstance(sample_id, str):
+            raise ValueError(f"E6 {split} source audio identity is missing or invalid")
+        if re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None:
+            raise ValueError(f"E6 {split} source audio SHA-256 is invalid")
+        by_hash.setdefault(digest.lower(), []).append(sample_id)
+    return by_hash
+
+
 def load_set_b_checkpoint(path, *, model, expected_dataset=None, optimizer=None, map_location="cpu"):
     path = Path(path).expanduser().resolve()
     checkpoint = torch.load(path, map_location=map_location, weights_only=False)
@@ -78,10 +105,18 @@ def load_set_b_checkpoint(path, *, model, expected_dataset=None, optimizer=None,
         if split in saved:
             if saved[split] != expected_dataset.provenance:
                 raise ValueError(f"E6 {split} cache provenance mismatch")
-        elif (saved.get("train", {}).get("laion_model_identity") != expected_dataset.laion_model_identity
-              or saved.get("train", {}).get("whisper_checkpoint_identity") != expected_dataset.whisper_checkpoint_identity
-              or saved.get("train", {}).get("whisper_preprocessing_identity") != expected_dataset.whisper_preprocessing_identity):
-            raise ValueError("E6 inference component provenance mismatch")
+        else:
+            saved_train = saved.get("train") if isinstance(saved, dict) else None
+            if not isinstance(saved_train, dict):
+                raise ValueError("E6 inference requires saved training provenance")
+            saved_laion_id = _laion_cache_id(saved_train.get("laion_cache_identity"), context="saved training")
+            expected_laion_id = _laion_cache_id(expected_dataset.laion_cache_identity, context=f"{split} inference")
+            if saved_laion_id != expected_laion_id:
+                raise ValueError("E6 inference LAION cache identity mismatch")
+            if (saved_train.get("laion_model_identity") != expected_dataset.laion_model_identity
+                    or saved_train.get("whisper_checkpoint_identity") != expected_dataset.whisper_checkpoint_identity
+                    or saved_train.get("whisper_preprocessing_identity") != expected_dataset.whisper_preprocessing_identity):
+                raise ValueError("E6 inference component provenance mismatch")
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
     if optimizer is not None:
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -139,10 +174,23 @@ class SetBResidualTrainer:
             raise ValueError("E6 requires exactly 30 epochs, positive batch_size and nonnegative num_workers")
         if set(train_dataset.sample_ids) & set(validation_dataset.sample_ids):
             raise ValueError("E6 train/validation sample identities overlap")
+        train_audio = _source_audio_ids(train_dataset.records, split="train")
+        validation_audio = _source_audio_ids(validation_dataset.records, split="validation")
+        shared_audio = sorted(set(train_audio) & set(validation_audio))
+        if shared_audio:
+            digest = shared_audio[0]
+            raise ValueError(
+                "E6 train/validation source audio overlap: "
+                f"train={train_audio[digest]}, validation={validation_audio[digest]}, wav_sha256={digest}"
+            )
         if (train_dataset.laion_model_identity != validation_dataset.laion_model_identity
                 or train_dataset.whisper_checkpoint_identity != validation_dataset.whisper_checkpoint_identity
                 or train_dataset.whisper_preprocessing_identity != validation_dataset.whisper_preprocessing_identity):
             raise ValueError("E6 train/validation component or preprocessing identities differ")
+        train_laion_id = _laion_cache_id(train_dataset.laion_cache_identity, context="train")
+        validation_laion_id = _laion_cache_id(validation_dataset.laion_cache_identity, context="validation")
+        if train_laion_id != validation_laion_id:
+            raise ValueError("E6 train/validation LAION cache identity mismatch")
         output = Path(output_dir).expanduser().resolve()
         output.mkdir(parents=True, exist_ok=True)
         best_path, latest_path, final_path = (output / f"expert6_{role}.pt" for role in ("best", "latest", "final"))

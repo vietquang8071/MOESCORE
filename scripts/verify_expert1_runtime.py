@@ -549,7 +549,7 @@ def run(args: argparse.Namespace, summary: Optional[Dict[str, Any]] = None) -> D
             "adapter_feature_dim": adapter.feature_dim,
             "dimension_metadata_match": (
                 adapter.embedding_dim == joint_embed_shape
-                and adapter.feature_dim == 5 * joint_embed_shape
+                and adapter.feature_dim == 4 * joint_embed_shape + 1
             ),
             "model_precision": str(next(model.parameters()).dtype),
             "tokenizer_name_or_path": getattr(

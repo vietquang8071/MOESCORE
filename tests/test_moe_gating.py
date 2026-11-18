@@ -32,11 +32,11 @@ class GatingNetworkTests(unittest.TestCase):
     def test_original_architecture_consumes_registry_width_and_four_experts(self):
         gate = GatingNetwork()
 
-        self.assertEqual(EXPECTED_FEATURE_WIDTH, 12544)
+        self.assertEqual(EXPECTED_FEATURE_WIDTH, 11010)
         self.assertEqual(tuple(type(layer) for layer in gate.net), (
             nn.Linear, nn.LayerNorm, nn.ReLU, nn.Dropout, nn.Linear, nn.Softmax
         ))
-        self.assertEqual(gate.net[0].in_features, 12544)
+        self.assertEqual(gate.net[0].in_features, 11010)
         self.assertEqual(gate.net[0].out_features, 512)
         self.assertEqual(gate.net[1].normalized_shape, (512,))
         self.assertTrue(gate.net[2].inplace)
@@ -99,7 +99,7 @@ class GatingNetworkTests(unittest.TestCase):
         self.assertTrue(all(p.requires_grad for p in gate.parameters()))
 
     def test_invalid_width_rank_dtype_and_nonfinite_features_are_rejected(self):
-        with self.assertRaisesRegex(ValueError, "12544"):
+        with self.assertRaisesRegex(ValueError, "11010"):
             GatingNetwork(input_feature_dim=7936)
         with self.assertRaisesRegex(ValueError, "four"):
             GatingNetwork(num_experts=3)

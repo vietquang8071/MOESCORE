@@ -113,7 +113,7 @@ class Top2LAIONAdapter(ExpertAdapter):
                 f"{_ADAPTER_NAME} requires the 48 kHz MOESCORE expert1_wavs input; "
                 f"processor expects {resolved_rate} Hz"
             )
-        super().__init__(feature_dim=5 * resolved_dim)
+        super().__init__(feature_dim=4 * resolved_dim + 1)
         self.embedding_dim = resolved_dim
         self.sample_rate = resolved_rate
         self.model = model

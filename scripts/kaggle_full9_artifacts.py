@@ -10,15 +10,17 @@ import time
 
 from data.moe_expert_cache import sha256_file
 from data.moe_feature_store import _atomic_json, validate_feature_store
+from model.expert_adapters.registry import profile_contract
 
 
 def validate_full9_store(store_root, expected_counts=None):
     result = {}
+    expected_width = profile_contract("full_9")[2]
     for split in ("train", "validation", "test"):
         manifest = validate_feature_store(store_root, split=split, require_labels=split != "test")
         count = sum(shard["count"] for shard in manifest["shards"])
         if (manifest.get("expert_profile") != "full_9" or len(manifest["expert_order"]) != 9
-                or manifest["feature_width"] != 32257 or (split == "test" and manifest["labels_present"])):
+                or manifest["feature_width"] != expected_width or (split == "test" and manifest["labels_present"])):
             raise ValueError(f"{split}: incompatible full_9 feature store")
         if expected_counts and count != expected_counts[split]:
             raise ValueError(f"{split}: expected {expected_counts[split]} samples, found {count}")

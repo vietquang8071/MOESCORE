@@ -13,15 +13,23 @@ from scripts import extract_moe_feature_store as extraction
 
 class PairedCrossCacheIdentityTests(unittest.TestCase):
     DIMENSIONS = {
+        "expert1": 2049,
+        "expert2": 4097,
+        "top2_m2d": 3073,
+        "top2_msclap": 4097,
+        "top2_laion": 2049,
+        "top2_mga": 4097,
+        "expert3": 3840,
+        "expert4": 1024,
+        "m2d_lora": 3073,
+    }
+    LEGACY_PAIRED_DIMENSIONS = {
         "expert1": 2560,
         "expert2": 5120,
         "top2_m2d": 3840,
         "top2_msclap": 5120,
         "top2_laion": 2560,
         "top2_mga": 5120,
-        "expert3": 3840,
-        "expert4": 1024,
-        "m2d_lora": 3073,
     }
     UNCHANGED = ("expert3", "expert4", "m2d_lora")
 
@@ -127,13 +135,13 @@ class PairedCrossCacheIdentityTests(unittest.TestCase):
         for expert in extraction._PAIRED_CROSS_EXPERTS:
             with self.subTest(expert=expert):
                 new_identity = self._identity(expert)
-                old_width = self.DIMENSIONS[expert] // 5 * 2
+                old_width = self.LEGACY_PAIRED_DIMENSIONS[expert]
                 with patch.object(extraction, "_PAIRED_CROSS_EXPERTS", frozenset()):
                     old_identity = self._identity(expert, feature_dim=old_width)
                 self.assertNotEqual(old_identity["cache_id"], new_identity["cache_id"])
                 self.assertEqual(
                     new_identity["score_contract"]["feature_representation"],
-                    "paired_cross_v1",
+                    "paired_cross_4d_plus_1_v2",
                 )
                 self.assertIn(
                     "model/expert_adapters/paired_cross_features.py",

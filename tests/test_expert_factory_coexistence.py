@@ -140,7 +140,7 @@ def _adapter_set():
     }
     adapters = {
         "expert1": Expert1Adapter(models["expert1"]),
-        "expert2": Expert2Adapter(models["expert2"], feature_dim=5120),
+        "expert2": Expert2Adapter(models["expert2"], feature_dim=4097),
         "expert3": Expert3Adapter(models["expert3"]),
         "expert4": Expert4Adapter(models["expert4"]),
     }
@@ -169,9 +169,9 @@ class ExpertRegistryTests(unittest.TestCase):
         self.assertEqual(EXPERT_ORDER, ("expert1", "expert2", "expert3", "expert4"))
         self.assertEqual(
             dict(EXPERT_FEATURE_DIMS),
-            {"expert1": 2560, "expert2": 5120, "expert3": 3840, "expert4": 1024},
+            {"expert1": 2049, "expert2": 4097, "expert3": 3840, "expert4": 1024},
         )
-        self.assertEqual(EXPECTED_FEATURE_WIDTH, 12544)
+        self.assertEqual(EXPECTED_FEATURE_WIDTH, 11010)
         self.assertEqual(
             FULL9_EXPERT_ORDER,
             ("expert1", "expert2", "expert3", "expert4", "top2_m2d", "top2_msclap", "top2_laion", "top2_mga", "m2d_lora"),
@@ -179,18 +179,18 @@ class ExpertRegistryTests(unittest.TestCase):
         self.assertEqual(
             dict(EXPERT_FEATURE_DIMS_FULL9),
             {
-                "expert1": 2560,
-                "expert2": 5120,
+                "expert1": 2049,
+                "expert2": 4097,
                 "expert3": 3840,
                 "expert4": 1024,
-                "top2_m2d": 3840,
-                "top2_msclap": 5120,
-                "top2_laion": 2560,
-                "top2_mga": 5120,
+                "top2_m2d": 3073,
+                "top2_msclap": 4097,
+                "top2_laion": 2049,
+                "top2_mga": 4097,
                 "m2d_lora": 3073,
             },
         )
-        self.assertEqual(EXPECTED_FULL9_FEATURE_WIDTH, 32257)
+        self.assertEqual(EXPECTED_FULL9_FEATURE_WIDTH, 27399)
         self.assertEqual(EXPERT_INPUT_CONTRACTS["expert1"].audio_key, "expert1_wavs")
         self.assertEqual(EXPERT_INPUT_CONTRACTS["expert2"].audio_shape, (None, 1, 320_000))
         self.assertEqual(EXPERT_INPUT_CONTRACTS["expert3"].sample_rate_hz, 16_000)
@@ -207,7 +207,7 @@ class ExpertRegistryTests(unittest.TestCase):
 
         class _FactoryAdapter(ExpertAdapter):
             def __init__(self):
-                super().__init__(2560)
+                super().__init__(2049)
 
             def _forward(self, batch):
                 raise NotImplementedError
@@ -251,7 +251,7 @@ class OutputContractTests(unittest.TestCase):
         ordered = OrderedDict(reversed(list(self._outputs().items())))
         scores, features = validate_and_assemble_expert_outputs(ordered, batch_size=2)
         self.assertEqual(tuple(scores.shape), (2, 4))
-        self.assertEqual(tuple(features.shape), (2, 12544))
+        self.assertEqual(tuple(features.shape), (2, 11010))
         self.assertTrue(torch.equal(scores[0], torch.tensor([1.0, 2.0, 3.0, 4.0])))
         for index, name in enumerate(EXPERT_ORDER):
             start = sum(EXPERT_FEATURE_DIMS[item] for item in EXPERT_ORDER[:index])
@@ -280,10 +280,10 @@ class OutputContractTests(unittest.TestCase):
     def test_batch_device_dtype_and_finiteness_must_match(self):
         cases = []
         output = self._outputs()
-        output["expert2"] = (torch.zeros(1, 1), torch.zeros(1, 5120))
+        output["expert2"] = (torch.zeros(1, 1), torch.zeros(1, 4097))
         cases.append((output, "batch"))
         output = self._outputs()
-        output["expert2"] = (torch.zeros(2, 1, dtype=torch.float64), torch.zeros(2, 5120, dtype=torch.float64))
+        output["expert2"] = (torch.zeros(2, 1, dtype=torch.float64), torch.zeros(2, 4097, dtype=torch.float64))
         cases.append((output, "dtype"))
         output = self._outputs()
         output["expert3"] = (torch.zeros(2, 1, device="meta"), torch.zeros(2, 3840, device="meta"))
@@ -335,7 +335,7 @@ class StubCoexistenceTests(unittest.TestCase):
                     outputs, batch_size=batch_size
                 )
                 self.assertEqual(tuple(scores.shape), (batch_size, 4))
-                self.assertEqual(tuple(features.shape), (batch_size, 12544))
+                self.assertEqual(tuple(features.shape), (batch_size, 11010))
                 self.assertTrue(torch.equal(scores[0], torch.tensor([1.0, 2.0, 3.0, 4.0])))
                 self.assertEqual(models["expert1"].model.calls, 1)
                 for name in ("expert2", "expert3", "expert4"):
@@ -437,7 +437,7 @@ print(json.dumps({"status": "PASS", "order": order, "loaded": [c.__name__ for c 
             self.assertEqual(checks["real_factory_coexistence"]["status"], "NOT_VERIFIED_REAL_FACTORY")
             self.assertEqual(checks["real_inference"]["status"], "NOT_VERIFIED_REAL_INFERENCE")
             self.assertEqual(checks["memory"]["status"], "NOT_VERIFIED_MEMORY")
-            self.assertEqual(checks["output_contract"]["feature_shape"], [2, 12544])
+            self.assertEqual(checks["output_contract"]["feature_shape"], [2, 11010])
 
 
 if __name__ == "__main__":

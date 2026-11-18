@@ -34,7 +34,7 @@ HF cache cần đúng Hub snapshot của `roberta-base`, `bert-base-uncased`, `g
 
 1. Upload `notebooks/MOESCORE_Full9_Kaggle.ipynb` vào Kaggle Notebook; gắn Inputs, chọn Python 3.12 nếu image có sẵn và chọn hai GPU. Notebook kiểm tra cả phiên bản Python lẫn số GPU ở stage 01.
 2. Sửa duy nhất cell **00**. Để `SMOKE_ONLY=True`, `RUN_GPU_SMOKE=True`, rồi **Run all**. Stage 08 trích xuất 4 mẫu/split qua chín expert; stage 09 chạy ba bước gate trên đặc trưng thật. Hai GPU được chia theo `WORKER_DEVICES`.
-3. Sau smoke thành công, đặt `SMOKE_ONLY=False`, `RUN_FULL_EXTRACTION=True`, `UPLOAD_FEATURE_CACHE=True`, `RUN_GATE_TRAINING=True`, `RUN_EVALUATION=True`, `RUN_TEST_INFERENCE=True`; chạy lại các stage từ đầu. Dữ liệu đầy đủ phải có train 7500, validation 3000, test 3000; feature width 32257, scores 9 cột.
+3. Sau smoke thành công, đặt `SMOKE_ONLY=False`, `RUN_FULL_EXTRACTION=True`, `UPLOAD_FEATURE_CACHE=True`, `RUN_GATE_TRAINING=True`, `RUN_EVALUATION=True`, `RUN_TEST_INFERENCE=True`; chạy lại các stage từ đầu. Dữ liệu đầy đủ phải có train 7500, validation 3000, test 3000; feature width được xác thực theo registry `full_9` (27399 với paired-cross `4D+1`), scores 9 cột.
 4. Có thể đổi GPU mỗi expert trong `WORKER_DEVICES` nhưng phải dùng cả `cuda:0` và `cuda:1`. Đổi thiết bị thực của một expert làm đổi cache identity của expert đó theo chính sách provenance hiện hành.
 5. Để resume phiên khác, gắn Kaggle Dataset cache vào `EXISTING_FEATURE_CACHE`. Notebook kiểm tra archive SHA-256 và khi chuẩn bị job sẽ đối chiếu checkpoint, source, preprocessing, sample manifest và assembly identity. Nếu store đầy đủ hợp lệ, extractor không nạp expert; nếu thiếu shard, chỉ chạy lại phần còn thiếu.
 

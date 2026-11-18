@@ -14,7 +14,7 @@ LOSS_CONFIG = {
     "contrastive": {"margin": 0.1, "beta": 0.99, "cbl": False},
 }
 PROVENANCE = {f"expert{i}": {"sha256": f"{i}" * 64} for i in range(1, 5)}
-CONFIG = {"seed": 2027, "loss": LOSS_CONFIG, "feature_dim": 12544}
+CONFIG = {"seed": 2027, "loss": LOSS_CONFIG, "feature_dim": 11010}
 
 
 def batch(index):
@@ -23,7 +23,7 @@ def batch(index):
         "split": "train",
         "sample_ids": [f"train:{index}-a.wav", f"train:{index}-b.wav"],
         "scores": torch.randn(2, 4, generator=generator),
-        "features": torch.randn(2, 12544, generator=generator),
+        "features": torch.randn(2, 11010, generator=generator),
         "labels_raw": torch.tensor([2.0, 8.0]),
         "labels_scale": "raw_0_to_10",
     }

@@ -126,7 +126,7 @@ class Expert1Adapter(ExpertAdapter):
                 "or provide a positive dimension from trusted model metadata"
             )
 
-        super().__init__(feature_dim=5 * embedding_dim)
+        super().__init__(feature_dim=4 * embedding_dim + 1)
         self.embedding_dim = embedding_dim
         self.model = model
         self._freeze_model()

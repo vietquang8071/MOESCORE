@@ -85,7 +85,7 @@ class MoeGateTrainerTests(unittest.TestCase):
             "split": "train",
             "sample_ids": [f"train:{i}.wav" for i in range(batch_size)],
             "scores": torch.randn(batch_size, 4, generator=generator),
-            "features": torch.randn(batch_size, 12544, generator=generator),
+            "features": torch.randn(batch_size, 11010, generator=generator),
             "labels_raw": torch.linspace(0.0, 10.0, batch_size),
             "labels_scale": "raw_0_to_10",
         }

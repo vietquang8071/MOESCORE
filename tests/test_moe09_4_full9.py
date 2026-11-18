@@ -110,8 +110,8 @@ class FullNineIntegrationTests(unittest.TestCase):
     def test_registry_assembly_and_gate(self):
         order, dims, width = profile_contract("full_9")
         self.assertEqual(order, EXPERT_PROFILES["full_9"])
-        self.assertEqual(width, 32257)
-        self.assertEqual(profile_contract("top1_4")[2], 12544)
+        self.assertEqual(width, 27399)
+        self.assertEqual(profile_contract("top1_4")[2], 11010)
         for name in order:
             self.assertTrue(callable(resolve_expert_adapter_class(name).from_config))
         outputs = {
@@ -121,7 +121,7 @@ class FullNineIntegrationTests(unittest.TestCase):
         }
         scores, features = validate_and_assemble_expert_outputs(outputs, profile="full_9")
         self.assertEqual(tuple(scores.shape), (2, 9))
-        self.assertEqual(tuple(features.shape), (2, 32257))
+        self.assertEqual(tuple(features.shape), (2, 27399))
         offset = 0
         for index, name in enumerate(order):
             self.assertTrue(torch.all(features[:, offset:offset + dims[name]] == index))
@@ -137,7 +137,7 @@ class FullNineIntegrationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_and_assemble_expert_outputs({key: value for key, value in outputs.items() if key != "m2d_lora"}, profile="full_9")
         with self.assertRaises(ValueError):
-            GatingNetwork(input_feature_dim=12544, num_experts=9, profile="full_9")
+            GatingNetwork(input_feature_dim=11010, num_experts=9, profile="full_9")
 
     def test_full9_store_train_checkpoint_and_infer(self):
         order, dims, width = profile_contract("full_9")

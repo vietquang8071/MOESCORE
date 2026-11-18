@@ -152,8 +152,8 @@ class Expert1AdapterForwardTests(unittest.TestCase):
                 self.assertTrue(torch.equal(score.squeeze(-1), expected_score))
                 self.assertTrue(torch.equal(features, expected_features))
                 self.assertEqual(tuple(score.shape), (batch_size, 1))
-                self.assertEqual(tuple(features.shape), (batch_size, 15))
-                self.assertEqual(adapter.feature_dim, 15)
+                self.assertEqual(tuple(features.shape), (batch_size, 13))
+                self.assertEqual(adapter.feature_dim, 13)
                 self.assertEqual(expert.model.calls, 1)
                 self.assertIs(expert.model.last_audio, batch["expert1_wavs"])
                 self.assertEqual(expert.model.last_captions, batch["captions_raw"])
@@ -164,8 +164,8 @@ class Expert1AdapterForwardTests(unittest.TestCase):
     def test_embedding_dimension_is_read_from_constructed_clap_metadata(self):
         adapter, _ = make_adapter(embedding_dim=5)
         inferred = Expert1Adapter(make_adapter(embedding_dim=5)[1])
-        self.assertEqual(adapter.feature_dim, 25)
-        self.assertEqual(inferred.feature_dim, 25)
+        self.assertEqual(adapter.feature_dim, 21)
+        self.assertEqual(inferred.feature_dim, 21)
 
     def test_explicit_dimension_must_match_model_metadata(self):
         _, expert = make_adapter(embedding_dim=3)
@@ -177,7 +177,7 @@ class Expert1AdapterForwardTests(unittest.TestCase):
         with torch.no_grad():
             score, features = adapter(make_batch(2))
         self.assertEqual(tuple(score.shape), (2, 1))
-        self.assertEqual(tuple(features.shape), (2, 15))
+        self.assertEqual(tuple(features.shape), (2, 13))
 
     def test_rejects_non_module_model_or_unknown_dimension(self):
         with self.assertRaisesRegex(TypeError, "nn.Module"):

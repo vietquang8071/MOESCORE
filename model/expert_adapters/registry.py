@@ -24,7 +24,7 @@ from model.expert_adapters.base import ExpertAdapter, validate_expert_output
 
 EXPERT_ORDER = ("expert1", "expert2", "expert3", "expert4")
 EXPERT_FEATURE_DIMS = MappingProxyType(
-    {"expert1": 2560, "expert2": 5120, "expert3": 3840, "expert4": 1024}
+    {"expert1": 2049, "expert2": 4097, "expert3": 3840, "expert4": 1024}
 )
 EXPECTED_FEATURE_WIDTH = sum(EXPERT_FEATURE_DIMS.values())
 
@@ -42,14 +42,14 @@ FULL9_EXPERT_ORDER = (
 )
 EXPERT_FEATURE_DIMS_FULL9 = MappingProxyType(
     {
-        "expert1": 2560,
-        "expert2": 5120,
+        "expert1": 2049,
+        "expert2": 4097,
         "expert3": 3840,
         "expert4": 1024,
-        "top2_m2d": 3840,
-        "top2_msclap": 5120,
-        "top2_laion": 2560,
-        "top2_mga": 5120,
+        "top2_m2d": 3073,
+        "top2_msclap": 4097,
+        "top2_laion": 2049,
+        "top2_mga": 4097,
         "m2d_lora": 3073,
     }
 )
@@ -148,10 +148,10 @@ class ExpertRegistration:
 EXPERT_REGISTRY = MappingProxyType(
     {
         "expert1": ExpertRegistration(
-            "model.expert_adapters.expert1_adapter", "Expert1Adapter", 2560
+            "model.expert_adapters.expert1_adapter", "Expert1Adapter", 2049
         ),
         "expert2": ExpertRegistration(
-            "model.expert_adapters.expert2_adapter", "Expert2Adapter", 5120
+            "model.expert_adapters.expert2_adapter", "Expert2Adapter", 4097
         ),
         "expert3": ExpertRegistration(
             "model.expert_adapters.expert3_adapter", "Expert3Adapter", 3840
@@ -159,10 +159,10 @@ EXPERT_REGISTRY = MappingProxyType(
         "expert4": ExpertRegistration(
             "model.expert_adapters.expert4_adapter", "Expert4Adapter", 1024
         ),
-        "top2_m2d": ExpertRegistration("model.expert_adapters.top2_m2d_adapter", "Top2M2DAdapter", 3840),
-        "top2_msclap": ExpertRegistration("model.expert_adapters.top2_msclap_adapter", "Top2MSCLAPAdapter", 5120),
-        "top2_laion": ExpertRegistration("model.expert_adapters.top2_laion_adapter", "Top2LAIONAdapter", 2560),
-        "top2_mga": ExpertRegistration("model.expert_adapters.top2_mga_adapter", "Top2MGAAdapter", 5120),
+        "top2_m2d": ExpertRegistration("model.expert_adapters.top2_m2d_adapter", "Top2M2DAdapter", 3073),
+        "top2_msclap": ExpertRegistration("model.expert_adapters.top2_msclap_adapter", "Top2MSCLAPAdapter", 4097),
+        "top2_laion": ExpertRegistration("model.expert_adapters.top2_laion_adapter", "Top2LAIONAdapter", 2049),
+        "top2_mga": ExpertRegistration("model.expert_adapters.top2_mga_adapter", "Top2MGAAdapter", 4097),
         "m2d_lora": ExpertRegistration("model.expert_adapters.m2d_lora_adapter", "M2DLoRAAdapter", 3073),
     }
 )

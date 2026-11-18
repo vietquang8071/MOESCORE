@@ -1,0 +1,28 @@
+# Point this at an already verified MOESCORE full_9 feature store.
+# It must contain M2D, MS-CLAP 2023, and MGA outputs from the same store identity.
+feature_store_root: ${MOESCORE_FULL9_FEATURE_STORE}
+output_dir: ${MOESCORE_E5_OUTPUT}
+
+# The Full9 exporter writes each source_manifest.json alongside its split.
+source_manifest_paths: {}
+
+runtime:
+  device: auto
+
+model:
+  hidden_dims: [256, 64]
+  dropout: 0.2
+
+training:
+  epochs: 20
+  batch_size: 8
+  num_workers: 0
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  gradient_clip: 1.0
+  seed: 42
+  holdout_fraction: 0.15
+  early_stopping_patience: 5
+  min_delta: 0.0
+
+resume_from: null

@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 import hashlib
 import json
+import math
+import numbers
 import os
 from pathlib import Path
 import shutil
@@ -52,6 +54,39 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _raw_label_float32(value: Any, *, field: str) -> np.float32:
+    """Validate a raw target and canonicalize it to the Full9 float32 scale."""
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{field} must be a numeric score, not a boolean")
+    if isinstance(value, torch.Tensor):
+        if value.numel() != 1:
+            raise TypeError(f"{field} must be a scalar score")
+        numeric = float(value.detach().cpu().item())
+    elif isinstance(value, (numbers.Real, np.number)):
+        numeric = float(value)
+    else:
+        raise TypeError(f"{field} must be a numeric score")
+    if not math.isfinite(numeric) or not 0.0 <= numeric <= 10.0:
+        raise ValueError(f"{field} must be finite and in [0,10]")
+    return np.float32(numeric)
+
+
+def _labels_match_float32(cached: Any, manifest: Any, *, field: str) -> bool:
+    """Compare a cached float32 target with a manifest value at identical precision."""
+    return _raw_label_float32(cached, field=f"{field} cached label") == _raw_label_float32(
+        manifest, field=f"{field} manifest label"
+    )
+
+
+def _group_ids_from_records(records: Sequence[Mapping[str, Any]]) -> list[str] | None:
+    values = [record.get("group_id") for record in records]
+    if all(value is None for value in values):
+        return None
+    if any(not isinstance(value, str) or not value or value.strip() != value for value in values):
+        raise ValueError("source manifest group_id values must be present, non-empty, trimmed strings for every row")
+    return list(values)
+
+
 def _read_source_manifest(path: Path, *, split: str, expected_sha256: str) -> list[dict[str, Any]]:
     try:
         source = json.loads(path.read_text(encoding="utf-8"))
@@ -96,6 +131,8 @@ def _read_source_manifest(path: Path, *, split: str, expected_sha256: str) -> li
             int(wav_sha256, 16)
         except ValueError as exc:
             raise ValueError(f"source manifest record {index} has an invalid WAV SHA-256") from exc
+        if record.get("label_raw") is not None:
+            _raw_label_float32(record["label_raw"], field=f"source manifest record {index} label")
         ids.append(sample_id)
         names.append(wave_file_name)
     if len(ids) != len(set(ids)) or len(names) != len(set(names)):
@@ -139,12 +176,14 @@ def _validate_component_identities(
             input_contract = identity.get("input_contract")
             if (
                 not isinstance(input_contract, Mapping)
-                or input_contract.get("sample_rate_hz") != 16_000
-                or input_contract.get("max_samples") != 160_000
+                or input_contract.get("audio_key") != "expert2_wavs"
+                or input_contract.get("audio_shape") != [None, 1, 320_000]
+                or input_contract.get("sample_rate_hz") != 32_000
+                or input_contract.get("max_samples") != 320_000
             ):
                 raise ValueError(
-                    "Set A MGA cache must use the Top 2 source input contract: 16 kHz, 160000 samples; "
-                    "the MOESCORE 32 kHz cache cannot be reused as source-equivalent"
+                    "Set A MGA cache must match the Full9 input contract: expert2_wavs, "
+                    "[B,1,320000], 32 kHz, 320000 samples"
                 )
         normalized_cache[name] = dict(identity)
         normalized_models[name] = dict(model_identity)
@@ -178,9 +217,9 @@ def write_set_a_cache(
     """Write aligned component outputs into a content-hashed E5 cache.
 
     Each component's sample ID sequence must exactly match the signed source
-    manifest order. The helper intentionally accepts precomputed outputs only;
-    callers can reuse M2D/MS-CLAP shards and supply the E5-specific 16 kHz MGA
-    extraction without loading all three models together.
+    manifest order. This generic writer accepts only already-computed current
+    Full9-compatible outputs; the normal E5 path reads the verified Full9
+    store directly and does not require a separate component cache.
     """
     if split not in {"train", "validation", "test"}:
         raise ValueError("split must be train, validation, or test")
@@ -248,9 +287,13 @@ def write_set_a_cache(
         raise ValueError("Set A test cache must not contain test labels")
     labels = None
     if labels_present:
-        labels = np.asarray(label_values, dtype=np.float32)
-        if not np.isfinite(labels).all() or np.any(labels < 0.0) or np.any(labels > 10.0):
-            raise ValueError("Set A raw labels must be finite and on the [0,10] scale")
+        labels = np.asarray(
+            [
+                _raw_label_float32(value, field=f"{split} source label {index}")
+                for index, value in enumerate(label_values)
+            ],
+            dtype=np.float32,
+        )
 
     root_path = Path(root).expanduser().resolve()
     target = root_path / split
@@ -301,126 +344,13 @@ def write_set_a_cache(
     return target / "set_a_manifest.json"
 
 
-def write_set_a_cache_from_full9(
-    full9_root: str | os.PathLike[str],
-    output_root: str | os.PathLike[str],
-    *,
-    split: str,
-    mga_output: Mapping[str, Any],
-    mga_sample_ids: Sequence[str],
-    mga_cache_identity: Mapping[str, Any],
-    mga_model_identity: Mapping[str, Any],
-    source_manifest_path: str | os.PathLike[str] | None = None,
-) -> Path:
-    """Reuse full9 M2D/MS-CLAP rows and overlay source-compatible MGA rows.
-
-    The MGA row IDs must match the source store exactly and in order. The
-    current full9 MGA shard is deliberately ignored because it uses the
-    MOESCORE 32 kHz input contract.
-    """
-    source_store = MoeFeatureStoreDataset(
-        str(full9_root), split=split, require_labels=(split == "train")
-    )
-    manifest = source_store.manifest
-    if manifest.get("expert_profile") != "full_9":
-        raise ValueError("Set A cache assembly requires a full_9 source store")
-    order, dimensions, _ = profile_contract("full_9")
-    if tuple(manifest.get("expert_order", ())) != tuple(order) or manifest.get("feature_dimensions") != dimensions:
-        raise ValueError("Set A full9 source store has incompatible expert ordering or dimensions")
-    sample_ids = list(source_store.sample_ids)
-    if len(sample_ids) != len(set(sample_ids)):
-        raise ValueError("full9 source store contains duplicate sample IDs")
-    if isinstance(mga_sample_ids, (str, bytes)) or not isinstance(mga_sample_ids, Sequence):
-        raise TypeError("mga_sample_ids must be an ordered sequence")
-    mga_ids = list(mga_sample_ids)
-    if len(mga_ids) != len(set(mga_ids)):
-        raise ValueError("source-compatible MGA cache contains duplicate sample IDs")
-    if mga_ids != sample_ids:
-        raise ValueError("source-compatible MGA sample IDs/order differ from the full9 source store")
-
-    source_path = (
-        Path(source_manifest_path).expanduser().resolve(strict=True)
-        if source_manifest_path is not None
-        else Path(full9_root).expanduser().resolve() / split / "source_manifest.json"
-    )
-    records = _read_source_manifest(
-        source_path,
-        split=split,
-        expected_sha256=manifest["source_manifest_sha256"],
-    )
-    source_ids = [record["sample_id"] for record in records]
-    source_names = [record["wave_file_name"] for record in records]
-    store_names = [name for shard in manifest["shards"] for name in shard["wave_file_names"]]
-    if source_ids != sample_ids or source_names != store_names:
-        raise ValueError("full9 source-store rows differ from the signed source manifest")
-
-    source_cache_identities = manifest.get("per_expert_cache_identities")
-    source_model_identities = manifest.get("checkpoint_provenance")
-    if not isinstance(source_cache_identities, Mapping) or not isinstance(source_model_identities, Mapping):
-        raise ValueError("full9 source store is missing per-expert provenance")
-    component_cache_identities = {
-        "top2_m2d": source_cache_identities.get("top2_m2d"),
-        "top2_msclap": source_cache_identities.get("top2_msclap"),
-        "top2_mga": mga_cache_identity,
-    }
-    component_model_identities = {
-        "top2_m2d": source_model_identities.get("top2_m2d"),
-        "top2_msclap": source_model_identities.get("top2_msclap"),
-        "top2_mga": mga_model_identity,
-    }
-    _validate_component_identities(component_cache_identities, component_model_identities)
-
-    if not isinstance(mga_output, Mapping) or set(mga_output) != {"score", "features"}:
-        raise TypeError("mga_output must contain exactly 'score' and 'features'")
-    mga_score = _as_cpu_float32_tensor(mga_output["score"], field="top2_mga.score")
-    mga_features = _as_cpu_float32_tensor(mga_output["features"], field="top2_mga.features")
-    if tuple(mga_score.shape) != (len(sample_ids), 1):
-        raise ValueError(f"source-compatible MGA scores must have shape [{len(sample_ids)},1]")
-    if tuple(mga_features.shape) != (len(sample_ids), SET_A_COMPONENT_FEATURE_DIMS["top2_mga"]):
-        raise ValueError("source-compatible MGA feature width/shape mismatch")
-
-    component_outputs: dict[str, dict[str, torch.Tensor]] = {
-        "top2_mga": {"score": mga_score, "features": mga_features}
-    }
-    feature_offsets: dict[str, tuple[int, int]] = {}
-    offset = 0
-    for name in order:
-        end = offset + dimensions[name]
-        feature_offsets[name] = (offset, end)
-        offset = end
-    score_indices = {name: order.index(name) for name in SET_A_COMPONENT_ORDER}
-    for name in ("top2_m2d", "top2_msclap"):
-        start, end = feature_offsets[name]
-        score_rows = []
-        feature_rows = []
-        for row_index in range(len(source_store)):
-            row = source_store[row_index]
-            if row["sample_id"] != sample_ids[row_index]:
-                raise ValueError("full9 source-store sample order changed during E5 cache assembly")
-            score_rows.append(row["scores"][score_indices[name] : score_indices[name] + 1])
-            feature_rows.append(row["features"][start:end])
-        component_outputs[name] = {
-            "score": torch.stack(score_rows, dim=0),
-            "features": torch.stack(feature_rows, dim=0),
-        }
-    return write_set_a_cache(
-        output_root,
-        split=split,
-        source_manifest_path=source_path,
-        component_outputs=component_outputs,
-        component_sample_ids={name: sample_ids for name in SET_A_COMPONENT_ORDER},
-        component_cache_identities=component_cache_identities,
-        component_model_identities=component_model_identities,
-    )
-
-
 class SetACachedDataset(Dataset):
-    """Expose verified Set A outputs from a full9 store or a standalone E5 cache.
+    """Expose Set A outputs from one verified Full9 store or compatible cache.
 
-    A standalone E5 cache is required when an E5-specific component such as
-    source-compatible 16 kHz MGA differs from the generic full9 extraction.
-    Both formats bind rows to one content-hashed source manifest and current
-    component/cache identities.
+    Full9 is the primary source: all three component rows are sliced from one
+    store identity and signed sample order. The optional standalone reader is
+    retained for generic precomputed component caches using the same current
+    4D+1 and Full9 MGA contracts.
     """
 
     def __init__(
@@ -439,6 +369,7 @@ class SetACachedDataset(Dataset):
             require_labels = split == "train"
         self.root = Path(root).expanduser().resolve()
         self.split = split
+        self.group_ids: list[str] | None = None
         split_root = self.root / split
         if (split_root / "set_a_manifest.json").is_file():
             self.store = None
@@ -501,6 +432,7 @@ class SetACachedDataset(Dataset):
             split=self.split,
             expected_sha256=self.manifest["source_manifest_sha256"],
         )
+        self.group_ids = _group_ids_from_records(self.source_records)
         indexed_ids = [sample_id for shard in self.manifest["shards"] for sample_id in shard["sample_ids"]]
         indexed_names = [name for shard in self.manifest["shards"] for name in shard["wave_file_names"]]
         source_ids = [record["sample_id"] for record in self.source_records]
@@ -594,6 +526,7 @@ class SetACachedDataset(Dataset):
             split=self.split,
             expected_sha256=manifest["source_manifest_sha256"],
         )
+        self.group_ids = _group_ids_from_records(self.source_records)
         source_ids = [record["sample_id"] for record in self.source_records]
         source_names = [record["wave_file_name"] for record in self.source_records]
         if ids != source_ids or names != source_names:
@@ -626,7 +559,9 @@ class SetACachedDataset(Dataset):
             if np.any(labels < 0.0) or np.any(labels > 10.0):
                 raise ValueError("standalone Set A raw labels must be in [0,10]")
             for index, record in enumerate(self.source_records):
-                if record.get("label_raw") is None or float(labels[index]) != float(record["label_raw"]):
+                if record.get("label_raw") is None or not _labels_match_float32(
+                    labels[index], record["label_raw"], field=f"standalone cache row {index}"
+                ):
                     raise ValueError("standalone Set A labels differ from the source manifest")
         self.store = None
         self.identity = cache_identity
@@ -704,7 +639,9 @@ class SetACachedDataset(Dataset):
             if label_raw is None:
                 raise ValueError("Set A training cache row is missing its raw target")
             expected_label = source_record.get("label_raw")
-            if expected_label is None or float(label_raw) != float(expected_label):
+            if expected_label is None or not _labels_match_float32(
+                label_raw, expected_label, field=f"{self.split} cache row {index}"
+            ):
                 raise ValueError("Set A training target differs from the source manifest")
             result["label_raw"] = label_raw
             result["target_normalized"] = (label_raw - 5.0) / 5.0
@@ -715,5 +652,4 @@ __all__ = [
     "SET_A_CACHE_SCHEMA_VERSION",
     "SetACachedDataset",
     "write_set_a_cache",
-    "write_set_a_cache_from_full9",
 ]

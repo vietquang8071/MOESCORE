@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import math
 import os
 from pathlib import Path
 import re
@@ -99,6 +100,22 @@ def load_set_a_config(path: str | os.PathLike[str]) -> dict[str, Any]:
     weight_decay = training.get("weight_decay", 1e-4)
     gradient_clip = training.get("gradient_clip", 1.0)
     seed = _positive_int(training.get("seed", 42), field="training.seed", allow_zero=True)
+    holdout_fraction = training.get("holdout_fraction", 0.15)
+    if (
+        isinstance(holdout_fraction, bool)
+        or not isinstance(holdout_fraction, (int, float))
+        or not math.isfinite(holdout_fraction)
+        or not 0 < holdout_fraction < 1
+    ):
+        raise ValueError("training.holdout_fraction must be strictly between 0 and 1")
+    early_stopping_patience = training.get("early_stopping_patience", 5)
+    if early_stopping_patience is not None and (
+        type(early_stopping_patience) is not int or early_stopping_patience <= 0
+    ):
+        raise ValueError("training.early_stopping_patience must be a positive integer or null")
+    min_delta = training.get("min_delta", 0.0)
+    if isinstance(min_delta, bool) or not isinstance(min_delta, (int, float)) or not math.isfinite(min_delta) or min_delta < 0:
+        raise ValueError("training.min_delta must be finite and non-negative")
     if isinstance(learning_rate, bool) or not isinstance(learning_rate, (int, float)) or learning_rate <= 0:
         raise ValueError("training.learning_rate must be positive")
     if isinstance(weight_decay, bool) or not isinstance(weight_decay, (int, float)) or weight_decay < 0:
@@ -117,6 +134,9 @@ def load_set_a_config(path: str | os.PathLike[str]) -> dict[str, Any]:
         "weight_decay": float(weight_decay),
         "gradient_clip": None if gradient_clip is None else float(gradient_clip),
         "seed": seed,
+        "holdout_fraction": float(holdout_fraction),
+        "early_stopping_patience": early_stopping_patience,
+        "min_delta": float(min_delta),
     }
 
     runtime = config["runtime"]
@@ -127,13 +147,6 @@ def load_set_a_config(path: str | os.PathLike[str]) -> dict[str, Any]:
         raise ValueError("runtime.device must be a non-empty device string")
     result["runtime"] = {"device": device}
 
-    resources = config.get("component_resources", {})
-    if not isinstance(resources, Mapping):
-        raise TypeError("component_resources must be a mapping")
-    result["component_resources"] = {
-        key: _path(value, field=f"component_resources.{key}", base=base)
-        for key, value in resources.items()
-    }
     resume = config.get("resume_from")
     result["resume_from"] = None if resume is None else _path(resume, field="resume_from", base=base)
     return result

@@ -1,21 +1,10 @@
-# E5 trains from a verified full_9 feature store; no pretrained model is loaded.
-# The environment variables should resolve to absolute paths on the local
-# machine or in the Kaggle resource/data mount.
-feature_store_root: ${MOESCORE_SET_A_FEATURE_STORE}
-output_dir: ${MOESCORE_SET_A_OUTPUT}
+# Point this at an already verified MOESCORE full_9 feature store.
+# It must contain M2D, MS-CLAP 2023, and MGA outputs from the same store identity.
+feature_store_root: ${MOESCORE_FULL9_FEATURE_STORE}
+output_dir: ${MOESCORE_E5_OUTPUT}
 
-# The feature-store exporter writes this file into each split directory. Set
-# overrides only when the content-addressed source manifest is stored elsewhere.
+# The Full9 exporter writes each source_manifest.json alongside its split.
 source_manifest_paths: {}
-
-# Resource paths document the frozen source checkpoints used by the cache and
-# let a local extraction wrapper resolve resources from a different root.
-component_resources:
-  m2d_checkpoint: ${MOESCORE_RESOURCE_ROOT}/weights/pretrained/checkpoint-30.pth
-  msclap_checkpoint: ${MOESCORE_RESOURCE_ROOT}/weights/pretrained/CLAP_weights_2023.pth
-  mga_checkpoint: ${MOESCORE_RESOURCE_ROOT}/weights/pretrained/mga-clap.pt
-  mga_source_dir: ${MOESCORE_RESOURCE_ROOT}/expert2_finetune/MGA-CLAP
-  mga_architecture_yaml: ${MOESCORE_RESOURCE_ROOT}/expert2_finetune/MGA-CLAP/settings/inference_example.yaml
 
 runtime:
   device: auto
@@ -32,5 +21,8 @@ training:
   weight_decay: 0.0001
   gradient_clip: 1.0
   seed: 42
+  holdout_fraction: 0.15
+  early_stopping_patience: 5
+  min_delta: 0.0
 
 resume_from: null

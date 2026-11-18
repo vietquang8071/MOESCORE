@@ -4,20 +4,24 @@ import tempfile
 import unittest
 import hashlib
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
 import torch
 
 from data.moe_expert_cache import build_assembly_identity, build_expert_cache_identity
-from data.moe_feature_store import MoeFeatureStoreDataset, MoeFeatureStoreWriter
+from data.moe_feature_store import MoeFeatureStoreWriter
 from data.set_a_cached_dataset import (
     SetACachedDataset,
     write_set_a_cache,
-    write_set_a_cache_from_full9,
 )
 from model.expert_adapters.paired_cross_features import build_paired_cross_features
-from model.expert_adapters.registry import profile_contract
+from model.expert_adapters.registry import (
+    FULL9_EXPERT_ORDER,
+    TOP2_EXPERT_INPUT_CONTRACTS,
+    profile_contract,
+)
 from model.composite_experts.set_a_residual import (
     SET_A_COMPONENT_DIMS,
     SET_A_COMPONENT_ORDER,
@@ -56,9 +60,21 @@ def make_component_outputs(batch_size: int = 2):
 
 
 def make_full9_store(root: Path, *, split: str = "train", representation=REPRESENTATION,
-                     ids: list[str] | None = None, labels: bool = True, mga_sample_rate: int = 16_000):
+                     ids: list[str] | None = None, labels: bool = True, mga_sample_rate: int = 32_000,
+                     label_values: list[float] | None = None,
+                     stored_label_values: list[float] | None = None,
+                     mga_input_contract: dict | None = None,
+                     group_ids: list[str] | None = None):
     order, dimensions, total_width = profile_contract("full_9")
     ids = ids or [f"{split}:{index}.wav" for index in range(2)]
+    if label_values is None:
+        label_values = [5.0, 8.0] if len(ids) == 2 else [5.0] * len(ids)
+    if stored_label_values is None:
+        stored_label_values = list(label_values)
+    if len(label_values) != len(ids) or len(stored_label_values) != len(ids):
+        raise ValueError("synthetic source and stored labels must match the sample count")
+    if group_ids is not None and len(group_ids) != len(ids):
+        raise ValueError("synthetic group IDs must match the sample count")
     source_records = []
     for index, sample_id in enumerate(ids):
         record = {
@@ -68,7 +84,9 @@ def make_full9_store(root: Path, *, split: str = "train", representation=REPRESE
             "wav_sha256": f"{index + 1:064x}",
         }
         if split != "test" and labels:
-            record["label_raw"] = [5.0, 8.0][index]
+            record["label_raw"] = label_values[index]
+        if group_ids is not None:
+            record["group_id"] = group_ids[index]
         source_records.append(record)
     source_body = {"schema_version": 1, "split": split, "records": source_records}
     source_hash = hashlib.sha256(
@@ -86,16 +104,19 @@ def make_full9_store(root: Path, *, split: str = "train", representation=REPRESE
         }
         if name in SET_A_COMPONENT_ORDER:
             score_contract.update(representation)
+        input_contract = asdict(TOP2_EXPERT_INPUT_CONTRACTS[name]) if name in SET_A_COMPONENT_ORDER else {
+            "audio_key": "expert3_wavs", "sample_rate_hz": 16_000, "max_samples": 160_000
+        }
+        if name == "top2_mga":
+            input_contract["sample_rate_hz"] = mga_sample_rate
+            if mga_input_contract:
+                input_contract.update(mga_input_contract)
         cache_identities[name] = build_expert_cache_identity(
             expert_name=name,
             checkpoint_provenance={"sha256": f"{index + 1:064x}"},
             implementation_provenance={"source": "synthetic-test"},
             preprocessing_provenance={"policy": "synthetic-test"},
-            input_contract={
-                "audio_key": "expert3_wavs" if name in {"top2_m2d", "top2_mga"} else "wav_paths",
-                "sample_rate_hz": mga_sample_rate if name == "top2_mga" else 16_000,
-                "max_samples": 160_000 if name == "top2_mga" else 160_000,
-            },
+            input_contract=input_contract,
             inference_policy={"module_mode": "eval"},
             score_contract=score_contract,
             relevant_dependencies={"torch": "test"},
@@ -141,7 +162,7 @@ def make_full9_store(root: Path, *, split: str = "train", representation=REPRESE
         wave_file_names=[sample_id.split(":", 1)[1] for sample_id in ids],
         scores=scores,
         features=features,
-        labels_raw=np.array([5.0, 8.0][:sample_count], dtype=np.float32) if labels else None,
+        labels_raw=np.asarray(stored_label_values, dtype=np.float32) if labels else None,
     )
     writer.finalize()
     source_path = root / split / "source_manifest.json"
@@ -285,6 +306,16 @@ class SetACachedDatasetTests(unittest.TestCase):
             self.assertEqual(tuple(item["component_outputs"]), SET_A_COMPONENT_ORDER)
             self.assertEqual(tuple(item["component_outputs"]["top2_m2d"]["features"].shape), (3073,))
             self.assertEqual(tuple(item["component_outputs"]["top2_msclap"]["features"].shape), (4097,))
+            self.assertEqual(tuple(item["component_outputs"]["top2_mga"]["features"].shape), (4097,))
+            expected_scores = train.store[0]["scores"]
+            offset = 0
+            for name in FULL9_EXPERT_ORDER:
+                width = profile_contract("full_9")[1][name]
+                if name in SET_A_COMPONENT_ORDER:
+                    output = item["component_outputs"][name]
+                    torch.testing.assert_close(output["score"], expected_scores[FULL9_EXPERT_ORDER.index(name):FULL9_EXPERT_ORDER.index(name) + 1])
+                offset += width
+            self.assertEqual(tuple(train.component_model_identities), SET_A_COMPONENT_ORDER)
             self.assertAlmostEqual(float(item["target_normalized"]), 0.0)
             make_full9_store(root, split="test", labels=False)
             test = SetACachedDataset(root, split="test")
@@ -300,12 +331,28 @@ class SetACachedDatasetTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "representation"):
                 SetACachedDataset(root, split="train")
 
-    def test_rejects_current_moescore_mga_32khz_cache_as_source_incompatible(self):
+    def test_accepts_full9_mga_32khz_contract_and_rejects_mismatches(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            make_full9_store(root, mga_sample_rate=32_000)
-            with self.assertRaisesRegex(ValueError, "16 kHz"):
-                SetACachedDataset(root, split="train")
+            root = Path(temporary) / "valid"
+            make_full9_store(root)
+            dataset = SetACachedDataset(root, split="train")
+            contract = dataset.component_cache_identities["top2_mga"]["input_contract"]
+            self.assertEqual(contract["audio_key"], "expert2_wavs")
+            self.assertEqual(contract["audio_shape"], [None, 1, 320000])
+            self.assertEqual(contract["sample_rate_hz"], 32000)
+            self.assertEqual(contract["max_samples"], 320000)
+
+            invalid_contracts = (
+                {"sample_rate_hz": 16_000},
+                {"max_samples": 160_000},
+                {"audio_key": "expert3_wavs"},
+                {"audio_shape": [None, 1, 160000]},
+            )
+            for index, changes in enumerate(invalid_contracts):
+                bad_root = Path(temporary) / f"bad-{index}"
+                make_full9_store(bad_root, mga_input_contract=changes)
+                with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "Full9.*32 kHz"):
+                    SetACachedDataset(bad_root, split="train")
 
     def test_writes_and_reads_standalone_e5_cache_with_verified_alignment(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -333,6 +380,84 @@ class SetACachedDatasetTests(unittest.TestCase):
             self.assertEqual(tuple(dataset[0]["component_outputs"]["top2_mga"]["features"].shape), (4097,))
             self.assertAlmostEqual(float(dataset[0]["target_normalized"]), 0.0)
 
+    def test_decimal_labels_round_trip_in_full9_and_standalone_caches(self):
+        values = [6.7, 4.43, 5.9, 7.1, 0.0, 10.0]
+        ids = [f"train:{index}.wav" for index in range(len(values))]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            full9_root = root / "full9"
+            identities, models = make_full9_store(
+                full9_root,
+                ids=ids,
+                label_values=values,
+            )
+            full9 = SetACachedDataset(full9_root, split="train")
+            for index, expected in enumerate(values):
+                self.assertEqual(
+                    np.float32(full9[index]["label_raw"]).item(),
+                    np.float32(expected).item(),
+                )
+
+            standalone_root = root / "standalone"
+            write_set_a_cache(
+                standalone_root,
+                split="train",
+                source_manifest_path=full9_root / "train" / "source_manifest.json",
+                component_outputs=make_component_outputs(len(values)),
+                component_sample_ids={name: ids for name in SET_A_COMPONENT_ORDER},
+                component_cache_identities={name: identities[name] for name in SET_A_COMPONENT_ORDER},
+                component_model_identities={name: models[name] for name in SET_A_COMPONENT_ORDER},
+            )
+            standalone = SetACachedDataset(standalone_root, split="train")
+            for index, expected in enumerate(values):
+                self.assertEqual(
+                    np.float32(standalone[index]["label_raw"]).item(),
+                    np.float32(expected).item(),
+                )
+
+    def test_rejects_genuinely_changed_full9_and_standalone_labels(self):
+        ids = ["train:0.wav", "train:1.wav"]
+        values = [6.7, 4.43]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            full9_root = root / "full9"
+            make_full9_store(
+                full9_root,
+                ids=ids,
+                label_values=values,
+                stored_label_values=[6.71, 4.43],
+            )
+            with self.assertRaisesRegex(ValueError, "source manifest"):
+                SetACachedDataset(full9_root, split="train")[0]
+
+            valid_root = root / "valid"
+            identities, models = make_full9_store(valid_root, ids=ids, label_values=values)
+            standalone_root = root / "standalone"
+            write_set_a_cache(
+                standalone_root,
+                split="train",
+                source_manifest_path=valid_root / "train" / "source_manifest.json",
+                component_outputs=make_component_outputs(2),
+                component_sample_ids={name: ids for name in SET_A_COMPONENT_ORDER},
+                component_cache_identities={name: identities[name] for name in SET_A_COMPONENT_ORDER},
+                component_model_identities={name: models[name] for name in SET_A_COMPONENT_ORDER},
+            )
+            split_root = standalone_root / "train"
+            labels_path = split_root / "labels_raw.npy"
+            labels = np.load(labels_path, allow_pickle=False)
+            labels[0] = np.float32(6.71)
+            np.save(labels_path, labels, allow_pickle=False)
+            manifest_path = split_root / "set_a_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["array_file_sha256"]["labels_raw.npy"] = hashlib.sha256(labels_path.read_bytes()).hexdigest()
+            body = {key: value for key, value in manifest.items() if key != "set_a_cache_identity_sha256"}
+            manifest["set_a_cache_identity_sha256"] = hashlib.sha256(
+                json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
+            ).hexdigest()
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "source manifest"):
+                SetACachedDataset(standalone_root, split="train")[0]
+
     def test_writer_rejects_component_row_order_mismatch(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -354,48 +479,30 @@ class SetACachedDatasetTests(unittest.TestCase):
                     component_model_identities=set_a_models,
                 )
 
-    def test_full9_assembly_reuses_m2d_ms_cache_and_overlays_source_mga(self):
+    def test_full9_features_and_scores_are_read_from_one_store_without_overlay(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            source_root = root / "source"
-            identities, models = make_full9_store(source_root, split="train", mga_sample_rate=32_000)
-            original_models = {"sha256": f"{8:064x}"}
-            self.assertEqual(models["top2_mga"], original_models)
-            mga_identity = build_expert_cache_identity(
-                expert_name="top2_mga",
-                checkpoint_provenance=original_models,
-                implementation_provenance={"source": "E5 source-compatible MGA"},
-                preprocessing_provenance={"sample_rate_hz": 16000, "samples": 160000},
-                input_contract={"audio_key": "expert3_wavs", "sample_rate_hz": 16000, "max_samples": 160000},
-                inference_policy={"module_mode": "eval", "parameters_frozen": True},
-                score_contract={
-                    "feature_shape": [None, 4097],
-                    "score_shape": [None, 1],
-                    **REPRESENTATION,
-                },
-                relevant_dependencies={"torch": "test"},
-            )
-            source_ids = ["train:0.wav", "train:1.wav"]
-            mga = make_component_outputs(batch_size=2)["top2_mga"]
-            write_set_a_cache_from_full9(
-                source_root,
-                root / "e5_cache",
-                split="train",
-                mga_output=mga,
-                mga_sample_ids=source_ids,
-                mga_cache_identity=mga_identity,
-                mga_model_identity=original_models,
-            )
-            combined = SetACachedDataset(root / "e5_cache", split="train")
-            source = MoeFeatureStoreDataset(source_root, split="train")
-            original = source[0]
-            self.assertEqual(combined.sample_ids, source_ids)
-            self.assertEqual(tuple(combined[0]["component_outputs"]), SET_A_COMPONENT_ORDER)
+            make_full9_store(root, split="train")
+            dataset = SetACachedDataset(root, split="train")
+            stored = dataset.store[0]
+            sample = dataset[0]
             order, dimensions, _ = profile_contract("full_9")
-            for name in ("top2_m2d", "top2_msclap"):
-                start = sum(dimensions[value] for value in order[: order.index(name)])
-                expected = original["features"][start : start + dimensions[name]]
-                torch.testing.assert_close(combined[0]["component_outputs"][name]["features"], expected)
+            score_blocks = []
+            feature_blocks = []
+            offset = 0
+            for name in order:
+                width = dimensions[name]
+                if name in SET_A_COMPONENT_ORDER:
+                    component = sample["component_outputs"][name]
+                    expected_score = stored["scores"][order.index(name):order.index(name) + 1]
+                    torch.testing.assert_close(component["score"], expected_score)
+                    torch.testing.assert_close(component["features"], stored["features"][offset:offset + width])
+                    score_blocks.append(component["score"])
+                    feature_blocks.append(component["features"])
+                offset += width
+            self.assertEqual(torch.stack(score_blocks).shape, (3, 1))
+            self.assertEqual(torch.cat(feature_blocks, dim=-1).shape, (11267,))
+            self.assertEqual(dataset.identity, dataset.store.identity)
 
     def test_store_rejects_duplicate_or_missing_sample_ids(self):
         with tempfile.TemporaryDirectory() as temporary:

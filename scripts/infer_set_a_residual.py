@@ -19,7 +19,7 @@ from data.set_a_cached_dataset import SetACachedDataset
 from model.composite_experts.set_a_residual import SetAResidualHead
 from model.expert_adapters.set_a_residual_adapter import SetAResidualAdapter
 from training.set_a_config import load_set_a_config
-from training.set_a_trainer import load_set_a_checkpoint
+from training.set_a_trainer import _resolve_device, load_set_a_checkpoint
 
 
 def _arguments() -> argparse.Namespace:
@@ -52,11 +52,7 @@ def main() -> int:
     batch_size = args.batch_size or config["training"]["batch_size"]
     if batch_size <= 0:
         raise ValueError("--batch-size must be positive")
-    device = torch.device(config["runtime"]["device"])
-    if config["runtime"]["device"] == "auto":
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError(f"CUDA device {device} was requested but CUDA is unavailable")
+    device = _resolve_device(config["runtime"]["device"])
     model = SetAResidualAdapter(
         SetAResidualHead(
             hidden_dims=config["model"]["hidden_dims"],

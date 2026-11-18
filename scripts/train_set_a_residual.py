@@ -50,6 +50,9 @@ def main() -> int:
         gradient_clip=training["gradient_clip"],
         seed=training["seed"],
         device=config["runtime"]["device"],
+        holdout_fraction=training["holdout_fraction"],
+        early_stopping_patience=training["early_stopping_patience"],
+        min_delta=training["min_delta"],
     )
     resume = args.resume or config["resume_from"]
     history = trainer.fit(
@@ -67,7 +70,9 @@ def main() -> int:
                 "epochs_completed": trainer.completed_epochs,
                 "global_step": trainer.global_step,
                 "latest_checkpoint": str(config["output_dir"] / "expert5_latest.pt"),
+                "best_checkpoint": str(config["output_dir"] / "expert5_best.pt"),
                 "final_checkpoint": str(config["output_dir"] / "expert5_final.pt"),
+                "final_checkpoint_role": "best holdout-MSE model; latest is the resumable last epoch",
                 "history": history,
             },
             indent=2,

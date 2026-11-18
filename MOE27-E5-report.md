@@ -1,116 +1,85 @@
-# Báo cáo triển khai MOE27-E5
+# Báo cáo sửa E5: tái sử dụng Full9 và holdout train-only
 
-## 1. Worktree và nhánh
+## Kết quả
+
+E5 hiện lấy M2D-CLAP, MS-CLAP 2023 và MGA-CLAP trực tiếp từ **cùng một verified Full9 feature store** qua `SetACachedDataset(full9_root, split=...)`. MGA dùng đúng hợp đồng Full9: `expert2_wavs`, `[B,1,320000]`, 32 kHz, tối đa 320.000 mẫu. Đã xóa adapter MGA riêng cho E5, smoke script của adapter đó và bộ test ép MGA 16 kHz. Không cần tái trích xuất MGA hay tạo cache MGA riêng.
+
+Kiến trúc và công thức điểm được giữ nguyên: từng component rộng 3.073 / 4.097 / 4.097; ghép M2D → MS-CLAP → MGA thành `[B,11267]`; điểm là affine trên trung bình cosine số học cộng residual MLP. Giao diện vẫn là `(score5, features5)` với `[B,1]`, `[B,11267]`. Không thêm gating, SVR hay compression.
+
+## Nhánh, mã nguồn và tài nguyên
 
 - Worktree: `/home/vitquay1708/Working_Space/Research/2027/code/MOESCORE-E5`
 - Nhánh: `dev/moe27-e5`
-- Base hiện tại khi bắt đầu: `4a1008effa220875c1d83a755606aadea3939704` (`Merge branch 'fix/moe09-4d-plus-one'`)
-- Thay đổi chỉ được thực hiện trong worktree E5; không đổi nhánh, reset, push hay merge.
+- Worktree được xác nhận thuộc MOESCORE-E5; không sửa nhánh integration hay worktree của agent khác.
+- Source Top 2 đã kiểm tra: `/home/vitquay1708/Working_Space/Research/2027/code/EnsembleSVR-XACLE`, gồm `train.py`, `features/extract_features.py`, `features/all_feature_dict.py`, `features/proximity_features.py`, `load_pretrained_models/load_model.py`, `datasets/fetch_data.py`, `config_submission1.json`.
+- Tài nguyên checkpoint đã định vị trong repo MOESCORE chính, không sao chép vào worktree: M2D `/home/vitquay1708/Working_Space/Research/2027/code/MOESCORE/weights/pretrained/checkpoint-30.pth`; MS-CLAP 2023 `/home/vitquay1708/Working_Space/Research/2027/code/MOESCORE/weights/pretrained/CLAP_weights_2023.pth`; MGA `/home/vitquay1708/Working_Space/Research/2027/code/MOESCORE/weights/pretrained/mga-clap.pt`.
+- Không tìm thấy verified Full9 feature store tại các vị trí local đã kiểm tra. Vì vậy kiểm chứng runtime ở tác vụ này dùng Full9 store synthetic trên CPU; không có real-cache smoke test hay train thật.
 
-## 2. Mã nguồn và checkpoint đã kiểm tra
+## Thay đổi
 
-Đã đọc mã Top 2 trong `/home/vitquay1708/Working_Space/Research/2027/code/EnsembleSVR-XACLE`: `train.py`, `features/extract_features.py`, `features/all_feature_dict.py`, `features/proximity_features.py`, `load_pretrained_models/load_model.py`, `datasets/fetch_data.py`, và `config_submission1.json`.
+- `data/set_a_cached_dataset.py`: dùng Full9 trực tiếp; xác nhận MGA 32 kHz/320.000 mẫu và `expert2_wavs`; giữ kiểm tra provenance, thứ tự sample, WAV và feature 4D+1; dùng một helper so nhãn sau khi đổi sang float32, kiểm tra hữu hạn và miền `[0,10]`.
+- `training/set_a_trainer.py`, `training/set_a_config.py`, `scripts/train_set_a_residual.py`: thêm split train-only xác định, MSE fit/holdout riêng, best checkpoint, early stopping và resume có kiểm tra split, seed, cấu hình, provenance và hash best checkpoint.
+- `scripts/infer_set_a_residual.py`: dùng resolver thiết bị chung; `auto` được phân giải trước khi gọi `torch.device`, hỗ trợ `cpu`/`cuda`, báo lỗi rõ khi CUDA không khả dụng hoặc device sai.
+- `configs/set_a_residual.example.yaml`, `configs/set_a_residual.local.yaml`: dùng `${MOESCORE_FULL9_FEATURE_STORE}` và `${MOESCORE_E5_OUTPUT}`, bỏ đường dẫn checkpoint và cấu hình MGA riêng.
+- `tests/test_set_a_residual.py`, `tests/test_set_a_training.py`: thêm kiểm tra Full9 MGA, decimal labels, provenance, split, resume, early stopping, best selection, device auto và inference CLI.
+- `docs/MOE27-E5-implementation.md`: cập nhật hợp đồng, khác biệt preprocessing, lệnh vận hành và giao diện Full7.
+- Đã xóa `model/expert_adapters/set_a_mga_source_adapter.py`, `scripts/smoke_test_set_a_mga_source.py`, `tests/test_set_a_source_compat.py` vì chỉ phục vụ luồng MGA riêng cũ.
+- Giữ thay đổi inference `device: auto` chưa commit đã có trong worktree lúc bắt đầu; refactor gọi resolver trainer dùng chung thay vì lặp logic.
 
-Ba checkpoint tìm được trong repo MOESCORE chính, không sao chép vào worktree E5:
+Không sửa registry, helper 4D+1 dùng chung, các adapter Top2 dùng chung, Full9 extractor, Global MoE, E1–E4, E6/E7 hoặc Kaggle notebook.
 
-- M2D-CLAP: `/home/vitquay1708/Working_Space/Research/2027/code/MOESCORE/weights/pretrained/checkpoint-30.pth`
-- MS-CLAP 2023: `/home/vitquay1708/Working_Space/Research/2027/code/MOESCORE/weights/pretrained/CLAP_weights_2023.pth`
-- MGA-CLAP: `/home/vitquay1708/Working_Space/Research/2027/code/MOESCORE/weights/pretrained/mga-clap.pt`
+## Label, holdout, checkpoint
 
-Các file triển khai và YAML MGA hiện có được dùng từ `expert2_finetune/MGA-CLAP` trong worktree MOESCORE-E5. Đường dẫn checkpoint tuyệt đối được ghi trong `configs/set_a_residual.local.yaml`; cấu hình portable dùng biến môi trường để Kaggle có thể chỉ định resource root khác.
+So sánh label dùng cùng biểu diễn float32 của cache, tránh false mismatch với `6.7`, `4.43`, `5.9`, `7.1`, `0.0`, `10.0`; label thay đổi thật vẫn bị từ chối.
 
-## 3. File đã tạo
+Holdout mặc định là 15% dữ liệu chính thức `train`, seed 42. Manifest Full9 hiện tại không có `group_id`, nên fallback xác định theo SHA256 của sample ID và seed. Nếu toàn bộ manifest có `group_id`, splitter chia nguyên nhóm; thiếu/malformed group metadata bị từ chối. Hai phần fit/holdout phải không rỗng và không giao nhau. Không dùng validation hoặc test labels để tối ưu, dừng sớm hay chọn checkpoint.
 
-- E5 head và adapter: `model/composite_experts/set_a_residual.py`, `model/expert_adapters/set_a_residual_adapter.py`.
-- Adapter MGA chỉ dành cho E5, giữ preprocessing Top 2: `model/expert_adapters/set_a_mga_source_adapter.py`.
-- Cache/dataset: `data/set_a_cached_dataset.py`.
-- Cấu hình và trainer: `training/set_a_config.py`, `training/set_a_trainer.py`.
-- Entry point: `scripts/train_set_a_residual.py`, `scripts/infer_set_a_residual.py`.
-- Smoke test có checkpoint thật: `scripts/smoke_test_set_a_mga_source.py`.
-- Cấu hình: `configs/set_a_residual.example.yaml`, `configs/set_a_residual.local.yaml`.
-- Kiểm thử: `tests/test_set_a_residual.py`, `tests/test_set_a_source_compat.py`, `tests/test_set_a_training.py`.
-- Tài liệu kỹ thuật: `docs/MOE27-E5-implementation.md`.
-- Kế hoạch làm việc: `docs/superpowers/plans/2026-11-18-moe27-e5.md`.
+Sau mỗi epoch, trainer ghi `train_mse`, `holdout_mse`, `best_holdout_mse`, learning rate; cập nhật `expert5_latest.pt` để resume và `expert5_best.pt` khi holdout MSE giảm hơn `min_delta`. Mặc định patience là 5 epoch; `null` tắt early stopping. `expert5_final.pt` được định nghĩa rõ là bản sao của checkpoint tốt nhất theo holdout, còn `latest` là epoch cuối đã chạy. Resume phục hồi optimizer, epoch/global step, best metric/epoch, tiến độ patience, seed và split; xác thực cache/provenance, cấu hình train và hash của `expert5_best.pt`. Tăng tổng `epochs` được phép; các thiết lập khác phải khớp.
 
-Không sửa adapter E1–E4, adapter Top2 dùng chung, registry, bộ ghép feature toàn cục, gating, E7 hay notebook/Kaggle pipeline.
+Checkpoint chỉ chứa E5 head/optimizer và metadata; không chứa tensor của ba CLAP backbones.
 
-## 4. Kiến trúc và tensor
+## Khác biệt với source Top 2
 
-- M2D-CLAP: `D=768`, feature `[B,3073]`.
-- MS-CLAP: `D=1024`, feature `[B,4097]`.
-- MGA-CLAP: `D=1024`, feature `[B,4097]`.
-- Ghép đúng thứ tự M2D, MS-CLAP, MGA: `features5` có dạng `[B,11267]`.
-- Mỗi vector component dùng năm khối `[audio, text, abs(normalize(audio)-normalize(text)), normalize(audio)*normalize(text), cosine_scalar]`; helper hiện hữu cho đúng 4D+1, cosine là một scalar.
-- Điểm E5 là `scale * ((s_m2d+s_msclap+s_mga)/3) + bias + residual_mlp(features5)`. Calibrator khởi tạo `scale=1`, `bias=0`; lớp cuối residual khởi tạo bằng 0.
-- `SetAResidualAdapter` giữ giao diện `ExpertAdapter` `(score, features)` với `[B,1]` và `[B,11267]`. Backbone bị đóng băng và không nằm trong optimizer/checkpoint E5.
+E5 cố ý sử dụng preprocessing MOESCORE Full9. MGA của source Top 2 đọc/pad/cắt 16 kHz và 160.000 mẫu, còn Full9 MGA nhận 32 kHz và 320.000 mẫu. MS-CLAP cũng theo crop giữa xác định của adapter MOESCORE thay vì lựa chọn ngẫu nhiên đoạn bảy giây trong source. Vendor M2D/MGA cần để chạy source song song không có đầy đủ trong source repo đã kiểm tra, nên không tuyên bố parity số học giữa embeddings source và Full9. Việc chuyển sang Full9 là quyết định kiến trúc hiện hành, không phải khẳng định output tương đương tuyệt đối.
 
-## 5. Tái sử dụng implementation 4D+1
+## Kiểm thử
 
-Worktree đã có commit `c15cd10` cập nhật helper và các adapter Top2 sang 4D+1, nên E5 tái sử dụng `build_paired_cross_features` hiện hữu, không tạo helper trùng lặp.
+Python môi trường kiểm thử: `/home/vitquay1708/miniconda3/envs/nlp/bin/python`.
 
-## 6. Kết quả đối chiếu mã nguồn Set A
+- `python -m unittest discover -s tests -p 'test_set_a_*.py' -v`: **33 đạt**.
+- `test_paired_cross_features.py`: **5 đạt**.
+- `test_top2_adapters.py`: **7 đạt**.
+- `test_moe_feature_store.py`: **6 đạt**.
+- `test_moe09_4_full9.py`: **4 đạt**.
+- Toàn bộ `python -m unittest discover -s tests -v`: **382 test, 380 đạt, 1 skip, 1 fail**. Lỗi duy nhất là `test_lightweight_diagnostic_emits_json_and_marks_real_checks_unverified` trong `tests/test_expert_factory_coexistence.py`: preflight yêu cầu các checkpoint E1–E4 không có trong worktree E5 tách biệt, trả `BLOCKED_MISSING_RESOURCE`, còn test mong exit code 0. Đây là lỗi môi trường/tài nguyên ngoài phạm vi E5; không sửa test hoặc checkpoint để che lỗi.
+- CUDA không khả dụng trong phiên chạy; không kiểm thử CUDA.
+- Synthetic CPU end-to-end đã chạy: tạo Full9 store → đọc ba component → train với holdout → lưu latest/best/final → resume/restore → chạy inference CLI với `device: auto`.
 
-- M2D dùng `PortableM2D`, `flat_features=True`, `encode_clap_audio/text`, đầu ra rộng 768. Kiểm tra độc lập trực tiếp với vendor M2D của repo Top 2 không thực hiện được vì thư mục vendor `m2d` không có trong source repo cục bộ.
-- MS-CLAP dùng API path-based và checkpoint 2023, đầu ra rộng 1024. Source Top 2 chọn audio segment ngẫu nhiên 7 giây, còn adapter MOESCORE hiện tại dùng crop giữa 7 giây; đây là khác biệt preprocessing, không khẳng định parity số học.
-- MGA dùng ASE, `msc()` theo codebook và chuẩn hóa của source. Adapter chung MOESCORE nhận waveform 32 kHz (`expert2_wavs`), trong khi Top 2 `fetch_data.py` truyền waveform giả định 16 kHz đã pad/cắt 160.000 mẫu. Vì vậy E5 có `SetAMGASourceAdapter` riêng dùng `expert3_wavs`, không sửa adapter dùng chung.
-- Checkpoint MGA khôi phục 415/415 tensor khớp, có 1 key thừa. Source repo Top 2 thiếu vendor `MGA-CLAP` và `examples`, do đó không thể instantiate riêng toàn bộ source stack để so sánh embedding từng phần.
-- Smoke test real checkpoint một mẫu train: M2D score `0.35162234`, `[1,3073]`; MS-CLAP score `0.64994228`, `[1,4097]`; MGA adapter chung 32 kHz score `0.47984895`, `[1,4097]`; MGA E5 16 kHz score `0.30485559`, `[1,4097]`. Tất cả output kiểm tra đều hữu hạn, float32, CPU, model ở eval và frozen. Hai score MGA khác nhau do input contract khác nhau; đây không phải phép so sánh parity với source độc lập.
-
-## 7. Lệnh train E5
-
-Chưa có cache feature trong worktree lúc triển khai. Trước khi train, cần cung cấp full9 store đã xác minh và output MGA source-compatible 16 kHz, ghép thành E5 cache theo hướng dẫn trong tài liệu kỹ thuật, sau đó cập nhật `feature_store_root` của local config. Lệnh train:
+## Lệnh train, resume và inference
 
 ```bash
-python scripts/train_set_a_residual.py --config configs/set_a_residual.local.yaml
+export MOESCORE_FULL9_FEATURE_STORE=/path/to/verified/full9_feature_store
+export MOESCORE_E5_OUTPUT=/path/to/e5_runs
+python scripts/train_set_a_residual.py --config configs/set_a_residual.example.yaml
 ```
-
-Resume:
 
 ```bash
 python scripts/train_set_a_residual.py \
-  --config configs/set_a_residual.local.yaml \
-  --resume /path/to/expert5_latest.pt
+  --config configs/set_a_residual.example.yaml \
+  --resume "$MOESCORE_E5_OUTPUT/expert5_latest.pt"
 ```
-
-Không khởi chạy trích xuất toàn bộ dữ liệu hay train thật trong tác vụ này. CLI được kiểm thử trên cache synthetic CPU; chưa thể chạy trên dữ liệu thật vì chưa có feature cache tương thích.
-
-## 8. Nạp checkpoint và chạy inference
-
-Lệnh inference trên cache test:
 
 ```bash
 python scripts/infer_set_a_residual.py \
-  --config configs/set_a_residual.local.yaml \
-  --checkpoint /path/to/expert5_final.pt \
+  --config configs/set_a_residual.example.yaml \
+  --checkpoint "$MOESCORE_E5_OUTPUT/expert5_best.pt" \
   --split test \
-  --output /path/to/expert5_test_scores.csv
+  --output "$MOESCORE_E5_OUTPUT/test_scores.csv"
 ```
 
-Checkpoint chứa trạng thái E5 và optimizer, cấu hình kiến trúc, hợp đồng feature, epoch/step, seed, provenance dữ liệu/cache/component, cùng metadata chuẩn hóa score. Checkpoint không chứa trọng số backbone.
+## Hợp đồng Full7 và trạng thái tích hợp
 
-## 9. Lệnh kiểm thử và kết quả
+Full7 truyền đúng mapping `batch["component_outputs"]` với ba khóa `top2_m2d`, `top2_msclap`, `top2_mga`; mỗi component cung cấp `score: float32[B,1]` và `features: float32[B,4D+1]`. Tất cả cùng batch size/device và feature theo năm block hiện hành. E5 trả `(score5, features5)` với `[B,1]` và `[B,11267]`; vector nối nguyên vẹn này là input cho Global Gating Network. Full7 Core cần thêm adapter E5 vào khởi tạo nội bộ và assembly tại đúng thứ tự/dimension đã thống nhất; tác vụ này không đăng ký E5 toàn cục.
 
-Lệnh E5: `/home/vitquay1708/miniconda3/envs/nlp/bin/python -m unittest discover -s tests -p 'test_set_a_*.py' -v` — **27/27 đạt**.
-
-Các suite hiện hữu đạt:
-
-- `test_paired_cross_features.py`: 5/5.
-- `test_top2_adapters.py`: 7/7.
-- `test_moe_feature_store.py`: 6/6.
-- `test_moe09_4_full9.py`: 4/4.
-
-Toàn bộ suite: `/home/vitquay1708/miniconda3/envs/nlp/bin/python -m unittest discover -s tests -v` — **376 test, 374 đạt, 1 skip, 1 fail**. Test fail là `test_lightweight_diagnostic_emits_json_and_marks_real_checks_unverified` trong `test_expert_factory_coexistence.py`: script preflight nhìn thấy các checkpoint bị thiếu trong worktree tách biệt, trả trạng thái `BLOCKED_MISSING_RESOURCE` và exit 1; test hiện tại lại đòi `PASS`. Không có file preflight, registry hay adapter E1–E4 nào trong diff E5. Đây là giới hạn test/resource hiện hữu được giữ nguyên, không bị che giấu bằng sửa test.
-
-CUDA không khả dụng nên không chạy train CUDA.
-
-## 10. Commit
-
-Commit triển khai trên nhánh `dev/moe27-e5`: `ac837adc7e530a0d23c208bbbfef4c135d74fe4b` (`feat(e5): implement Set A cosine residual expert`). Báo cáo ghi lại SHA commit triển khai này; bản cập nhật SHA của báo cáo nằm trong commit tài liệu tiếp theo.
-
-## 11. Integration blockers còn lại
-
-Worktree chưa có feature cache E5 tương thích; cần full9 cache cùng MGA source-compatible 16 kHz rows trước khi chạy training thật. Bộ vendor M2D/MGA trong repo Top 2 không hiện diện để đo parity embedding độc lập. CUDA không khả dụng trong môi trường này.
-
-## 12. Hợp đồng chính xác cho Full7 Core
-
-Full7 gọi `score5, features5 = expert5(batch)`, trong đó `batch["component_outputs"]` có đúng ba khóa `top2_m2d`, `top2_msclap`, `top2_mga`; mỗi giá trị có `score: float32[B,1]` và `features: float32[B,4D+1]`. Các tensor phải cùng batch/device và feature từng component phải theo đúng năm block. E5 trả score `[B,1]` cùng feature nối nguyên vẹn `[B,11267]`. Full7 cần thêm E5 vào cấu hình/khởi tạo expert và global feature-store assembly theo thứ tự và dimension đã thống nhất; E5 chưa được đăng ký vào registry trong commit này.
+- Commit SHA: sẽ được điền sau khi commit trên `dev/moe27-e5`.
+- Trạng thái: synthetic/regression verification đã đạt; sẵn sàng tích hợp sau khi cung cấp verified Full9 store và lưu ý lỗi test toàn repo nêu trên. Chưa xác minh trên cache thật.

@@ -1,0 +1,17 @@
+feature_store_root: ${MOESCORE_FULL9_FEATURE_STORE}
+whisper_cache_root: ${MOESCORE_WHISPER_FEATURE_CACHE}
+output_dir: ${MOESCORE_E6_OUTPUT}
+runtime:
+  device: auto
+model:
+  hidden_dims: [256, 64]
+  dropout: 0.2
+training:
+  epochs: 30
+  batch_size: 8
+  num_workers: 0
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  gradient_clip: 1.0
+  seed: 42
+  selection_metric: official_validation_mse

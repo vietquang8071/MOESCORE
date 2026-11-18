@@ -115,10 +115,10 @@ class DualGpuTests(unittest.TestCase):
             calls = []
             fake = SimpleNamespace(
                 dataset_upload=lambda **kwargs: calls.append(kwargs),
-                dataset_download=lambda *args, **kwargs: str(upload / kwargs["path"]),
             )
-            with patch.dict(sys.modules, {"kagglehub": fake}), patch.object(artifacts, "check_private_upload_target", return_value=True):
-                report = artifacts.upload_feature_cache("owner/slug", upload, version_notes="test")
+            api = self._upload_verification_api(upload)
+            with patch.dict(sys.modules, {"kagglehub": fake}):
+                report = artifacts.upload_feature_cache("owner/slug", upload, version_notes="test", api=api)
             self.assertEqual(report["status"], "PASS")
             self.assertEqual(calls[0]["handle"], "owner/slug")
             self.assertEqual(calls[0]["local_dataset_dir"], str(upload))
@@ -131,18 +131,41 @@ class DualGpuTests(unittest.TestCase):
             artifacts.package_feature_cache(root / "source", upload)
             corrupt = root / "corrupt.tar"
             corrupt.write_bytes(b"corrupt remote bytes")
-            fake = SimpleNamespace(dataset_upload=lambda **kwargs: None,
-                dataset_download=lambda *args, **kwargs: str(corrupt if kwargs["path"] == "feature_cache.tar" else upload / "upload_manifest.json"))
-            with patch.dict(sys.modules, {"kagglehub": fake}), patch.object(artifacts, "check_private_upload_target", return_value=True):
+            fake = SimpleNamespace(dataset_upload=lambda **kwargs: None)
+            api = self._upload_verification_api(upload, corrupt_archive=corrupt)
+            with patch.dict(sys.modules, {"kagglehub": fake}):
                 with self.assertRaisesRegex(ValueError, "archive SHA-256"):
-                    artifacts.upload_feature_cache("owner/slug", upload)
+                    artifacts.upload_feature_cache("owner/slug", upload, api=api)
 
     def test_existing_public_dataset_is_rejected_before_upload(self):
-        api = SimpleNamespace(dataset_view=lambda handle: {"isPrivate": False})
+        api = SimpleNamespace(is_private=False)
+        api.authenticate = lambda: None
+        def dataset_metadata(handle, path):
+            metadata = Path(path) / "dataset-metadata.json"
+            metadata.write_text(json.dumps({"isPrivate": api.is_private}))
+            return str(metadata)
+        api.dataset_metadata = dataset_metadata
         with self.assertRaisesRegex(ValueError, "public"):
             artifacts.check_private_upload_target("owner/slug", api=api)
-        api.dataset_view = lambda handle: {"isPrivate": True}
+        api.is_private = True
         self.assertTrue(artifacts.check_private_upload_target("owner/slug", api=api))
+
+    @staticmethod
+    def _upload_verification_api(upload, corrupt_archive=None):
+        api = SimpleNamespace(authenticate=lambda: None)
+
+        def dataset_metadata(handle, path):
+            metadata = Path(path) / "dataset-metadata.json"
+            metadata.write_text(json.dumps({"isPrivate": True}))
+            return str(metadata)
+
+        def dataset_download_file(handle, file_name, path, force, quiet, unzip):
+            source = corrupt_archive if file_name == "feature_cache.tar" and corrupt_archive else upload / file_name
+            return Path(path, file_name).write_bytes(source.read_bytes())
+
+        api.dataset_metadata = dataset_metadata
+        api.dataset_download_file = dataset_download_file
+        return api
 
     def test_prepared_job_fingerprints_each_experts_assigned_device(self):
         order = extraction.EXPERT_PROFILES["full_9"]

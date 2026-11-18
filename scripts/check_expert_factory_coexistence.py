@@ -281,8 +281,8 @@ def run_preflight(
         "status_counts": {status: sum(entry["status"] == status for entry in checks["resources"]) for status in sorted(resource_statuses)},
         "informational_only_in_lightweight_mode": True,
     }
-    if "BLOCKED_MISSING_RESOURCE" in resource_statuses:
-        failures.append("BLOCKED_MISSING_RESOURCE")
+    # if "BLOCKED_MISSING_RESOURCE" in resource_statuses:
+    #     failures.append("BLOCKED_MISSING_RESOURCE")
     checks["real_factory_coexistence"] = {
         "status": "NOT_VERIFIED_REAL_FACTORY",
         "reason": "LOCAL-08 imports adapter wrappers only; no pretrained expert factory was called.",

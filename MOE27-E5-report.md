@@ -81,5 +81,5 @@ python scripts/infer_set_a_residual.py \
 
 Full7 truyền đúng mapping `batch["component_outputs"]` với ba khóa `top2_m2d`, `top2_msclap`, `top2_mga`; mỗi component cung cấp `score: float32[B,1]` và `features: float32[B,4D+1]`. Tất cả cùng batch size/device và feature theo năm block hiện hành. E5 trả `(score5, features5)` với `[B,1]` và `[B,11267]`; vector nối nguyên vẹn này là input cho Global Gating Network. Full7 Core cần thêm adapter E5 vào khởi tạo nội bộ và assembly tại đúng thứ tự/dimension đã thống nhất; tác vụ này không đăng ký E5 toàn cục.
 
-- Commit SHA: sẽ được điền sau khi commit trên `dev/moe27-e5`.
+- Commit triển khai: `9dd89d2` (`fix(e5): reuse Full9 MGA and harden Set A training pipeline`).
 - Trạng thái: synthetic/regression verification đã đạt; sẵn sàng tích hợp sau khi cung cấp verified Full9 store và lưu ý lỗi test toàn repo nêu trên. Chưa xác minh trên cache thật.

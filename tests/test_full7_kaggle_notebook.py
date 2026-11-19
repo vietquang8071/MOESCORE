@@ -1,3 +1,4 @@
+import ast
 import json
 import re
 from pathlib import Path
@@ -49,3 +50,141 @@ def test_full7_kaggle_notebook_propagates_experimental_flags_and_metrics_stage()
     assert "SCORE_REVIEW_PATH.write_text" not in experimental_branch
     pinned = re.search(r'^SOURCE_COMMIT\s*=\s*"([0-9a-f]{40})"', combined, re.MULTILINE)
     assert pinned and pinned.group(1) == "fe7de437842e4907421d645cfe71d0015bce895c"
+
+
+def _load_gate_decision_helpers(notebook):
+    source = next(
+        "".join(cell.get("source", []))
+        for cell in notebook["cells"]
+        if cell.get("cell_type") == "code" and "def select_gate_training_action" in "".join(cell.get("source", []))
+    )
+    tree = ast.parse(source)
+    selected = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {
+            "select_gate_training_action", "gate_resume_args", "isolated_gate_output_root",
+        }
+    ]
+    namespace = {}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=selected, type_ignores=[])),
+                 "notebook-gate-decision-helpers", "exec"), namespace)
+    return (namespace["select_gate_training_action"], namespace["gate_resume_args"],
+            namespace["isolated_gate_output_root"], source)
+
+
+def test_full7_gate_resume_requires_both_checkpoints_and_isolates_incompatible_artifacts(tmp_path):
+    notebook_path = Path(__file__).resolve().parents[1] / "notebooks/MOESCORE_Full7_T4x2_Kaggle.ipynb"
+    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+    choose_action, resume_args, isolated_output, cell_source = _load_gate_decision_helpers(notebook)
+
+    # A: both checkpoints are valid, but the run is incomplete, so resume latest.
+    latest = tmp_path / "safe-resume" / "latest_gate.pt"
+    best = tmp_path / "safe-resume" / "best_gate.pt"
+    latest.parent.mkdir()
+    latest.write_bytes(b"latest-good")
+    best.write_bytes(b"best-good")
+    decision = choose_action(latest, best, True, True, False)
+    assert decision == {
+        "action": "resume",
+        "resume_checkpoint": latest,
+        "isolate_output": False,
+    }
+    assert resume_args(decision["resume_checkpoint"]) == ["--resume", latest]
+
+    # B: a compatible latest is insufficient when best is missing.
+    missing_best_root = tmp_path / "missing-best"
+    missing_latest = missing_best_root / "latest_gate.pt"
+    missing_latest.parent.mkdir()
+    missing_latest.write_bytes(b"preserve-me")
+    missing_best = missing_best_root / "best_gate.pt"
+    decision = choose_action(missing_latest, missing_best, True, False, False)
+    fresh_command = ["train_moe_gating.py", *resume_args(decision["resume_checkpoint"])]
+    assert decision["action"] == "fresh_isolated"
+    assert decision["isolate_output"] is True
+    assert decision["resume_checkpoint"] is None
+    assert "--resume" not in fresh_command
+    fresh_root = isolated_output(missing_best_root, tmp_path / "gate-runs", 101)
+    assert fresh_root == tmp_path / "gate-runs" / "missing-best_fresh_101"
+    assert fresh_root != missing_best_root and not fresh_root.exists()
+    assert missing_latest.read_bytes() == b"preserve-me"
+    assert not missing_best.exists()
+
+    # C: a present but corrupted/incompatible best checkpoint also forces fresh training.
+    bad_best_root = tmp_path / "bad-best"
+    bad_best_root.mkdir()
+    bad_latest, bad_best = bad_best_root / "latest_gate.pt", bad_best_root / "best_gate.pt"
+    bad_latest.write_bytes(b"latest-good")
+    bad_best.write_bytes(b"corrupt-best")
+    decision = choose_action(bad_latest, bad_best, True, False, False)
+    assert decision["action"] == "fresh_isolated"
+    assert decision["resume_checkpoint"] is None
+    assert isolated_output(bad_best_root, tmp_path / "gate-runs", 102) != bad_best_root
+    assert bad_latest.read_bytes() == b"latest-good"
+    assert bad_best.read_bytes() == b"corrupt-best"
+    decision = choose_action(bad_latest, bad_best, False, False, False)
+    assert decision["action"] == "fresh_isolated"
+    assert decision["resume_checkpoint"] is None
+    assert bad_latest.read_bytes() == b"latest-good"
+    assert bad_best.read_bytes() == b"corrupt-best"
+
+    # D: a missing or incompatible latest forces isolation even if best is compatible.
+    missing_latest_root = tmp_path / "missing-latest"
+    missing_latest_root.mkdir()
+    missing_latest, valid_best = missing_latest_root / "latest_gate.pt", missing_latest_root / "best_gate.pt"
+    valid_best.write_bytes(b"best-good")
+    decision = choose_action(missing_latest, valid_best, False, True, False)
+    assert decision["action"] == "fresh_isolated"
+    assert decision["resume_checkpoint"] is None
+    assert valid_best.read_bytes() == b"best-good"
+
+    incompatible_latest = missing_latest_root / "latest_gate.pt"
+    incompatible_latest.write_bytes(b"old-latest")
+    decision = choose_action(incompatible_latest, valid_best, False, True, False)
+    assert decision["action"] == "fresh_isolated"
+    assert decision["resume_checkpoint"] is None
+    assert incompatible_latest.read_bytes() == b"old-latest"
+
+    # E: completed runs are reused only when both checkpoint compatibility checks pass.
+    decision = choose_action(latest, best, True, True, True)
+    assert decision["action"] == "reuse_completed"
+    assert decision["resume_checkpoint"] is None
+    assert decision["isolate_output"] is False
+    assert "--resume" not in resume_args(decision["resume_checkpoint"])
+    decision = choose_action(latest, best, False, True, True)
+    assert decision["action"] == "fresh_isolated"
+    assert decision["resume_checkpoint"] is None
+
+    # With no existing checkpoints, start fresh in the selected directory.
+    empty_root = tmp_path / "empty"
+    decision = choose_action(empty_root / "latest_gate.pt", empty_root / "best_gate.pt",
+                             False, False, False)
+    assert decision["action"] == "fresh"
+    assert decision["isolate_output"] is False
+    assert decision["resume_checkpoint"] is None
+
+    # The notebook must consume this tested decision, reset state during isolation,
+    # and preserve every checkpoint identity predicate used to derive compatibility.
+    assert 'gate_action = select_gate_training_action(' in cell_source
+    assert 'resume_checkpoint = gate_action["resume_checkpoint"]' in cell_source
+    assert 'if gate_action["isolate_output"]:' in cell_source
+    assert 'GATE_ROOT = isolated_gate_output_root(previous_root, GATE_ROOT_BASE, time.time_ns())' in cell_source
+    assert 'write_gate_config(GATE_ROOT)' in cell_source
+    assert 'latest = GATE_ROOT / "latest_gate.pt"' in cell_source
+    assert 'best = GATE_ROOT / "best_gate.pt"' in cell_source
+    assert 'completed = GATE_ROOT / "run_manifest.json"' in cell_source
+    assert 'resume_checkpoint = None' in cell_source
+    assert 'cmd += gate_resume_args(resume_checkpoint)' in cell_source
+    completed_check = cell_source.split("completed_compatible = (", 1)[1].split("\n)", 1)[0]
+    assert "and latest_compatible" in completed_check
+    for predicate in (
+        'payload.get("format_version") == 4',
+        'identity.get("score_review_policy") == SCORE_REVIEW_POLICY',
+        'payload.get("config") == expected_gate_config',
+        'payload.get("source_code_sha256") == current_source_sha256',
+        'identity == expected_feature_store_identity',
+        'payload.get("expert_checkpoint_provenance") == expected_expert_provenance',
+        'identity.get("audio_overlap_diagnostic") == current_overlap_diagnostic',
+        'payload.get("feature_store_identity_sha256") == canonical_sha256(identity)',
+    ):
+        assert predicate in cell_source

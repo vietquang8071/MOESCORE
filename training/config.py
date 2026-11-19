@@ -81,7 +81,8 @@ def load_moe_training_config(path: str | Path) -> dict[str, Any]:
     _positive_int(runtime["seed"], "runtime.seed", allow_zero=True)
 
     data = _require_mapping(config["data"], "data")
-    _keys(data, field="data", allowed={"feature_store_root", "profile", "score_review_file"}, required={"feature_store_root"})
+    _keys(data, field="data", allowed={"feature_store_root", "profile", "score_review_file",
+                                        "allow_train_validation_audio_overlap"}, required={"feature_store_root"})
     if "profile" in data and (not isinstance(data["profile"], str)
                               or data["profile"] not in {"top1_4", "full_9", "full_7"}):
         raise MoeTrainingConfigError("data.profile must name a registered expert profile")
@@ -89,6 +90,10 @@ def load_moe_training_config(path: str | Path) -> dict[str, Any]:
     if "score_review_file" in data:
         data["score_review_file"] = _resolve_relative(data["score_review_file"], base=config_path.parent,
                                                        field="data.score_review_file")
+    allow_overlap = data.get("allow_train_validation_audio_overlap", False)
+    if type(allow_overlap) is not bool:
+        raise MoeTrainingConfigError("data.allow_train_validation_audio_overlap must be boolean")
+    data["allow_train_validation_audio_overlap"] = allow_overlap
     config["output_dir"] = _resolve_relative(config["output_dir"], base=config_path.parent, field="output_dir")
 
     training = _require_mapping(config["training"], "training")

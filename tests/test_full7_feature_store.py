@@ -94,6 +94,74 @@ def test_training_preflight_rejects_cross_split_duplicate_wav():
     with pytest.raises(ValueError, match="cross-split duplicate WAV"):
         _store_provenance(SimpleNamespace(manifest=train_manifest, identity="a" * 64),
                           SimpleNamespace(manifest=val_manifest, identity="b" * 64))
+    with pytest.warns(UserWarning, match="optimistically biased"):
+        _, identity = _store_provenance(
+            SimpleNamespace(manifest=train_manifest, identity="a" * 64),
+            SimpleNamespace(manifest=val_manifest, identity="b" * 64),
+            allow_train_validation_audio_overlap=True,
+        )
+    diagnostic = identity["audio_overlap_diagnostic"]
+    assert diagnostic["policy"] == "experimental_train_validation_audio_overlap"
+    assert diagnostic["overlapping_sha256_count"] == 1
+    assert diagnostic["overlaps"][0]["train_sample_ids"] == ["train:a.wav"]
+    assert diagnostic["overlaps"][0]["validation_sample_ids"] == ["validation:b.wav"]
+
+
+def test_moe_config_defaults_overlap_policy_to_strict_and_requires_boolean(tmp_path):
+    import yaml
+    from training.config import load_moe_training_config
+
+    root = __import__("pathlib").Path(__file__).resolve().parents[1]
+    raw = yaml.safe_load((root / "configs/moe_full7.example.yaml").read_text())
+    config_path = tmp_path / "moe.yaml"
+    raw["data"]["feature_store_root"] = str(tmp_path / "store")
+    config_path.write_text(yaml.safe_dump(raw))
+    assert load_moe_training_config(config_path)["data"]["allow_train_validation_audio_overlap"] is False
+    raw["data"]["allow_train_validation_audio_overlap"] = "yes"
+    config_path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match="boolean"):
+        load_moe_training_config(config_path)
+
+
+@pytest.mark.parametrize("rows, message", [
+    ([{"sample_id": "train:a.wav", "wav_sha256": "invalid"}], "SHA-256"),
+    ([{"sample_id": "train:a.wav", "wav_sha256": "a" * 64},
+      {"sample_id": "train:a.wav", "wav_sha256": "b" * 64}], "duplicate train source sample ID"),
+])
+def test_global_gate_experimental_policy_still_rejects_invalid_source_identity(rows, message):
+    from scripts.train_moe_gating import _store_provenance
+    order, dims, _ = profile_contract("full_7")
+    provenance = {name: {"sha256": "a" * 64} for name in order}
+    common = {"expert_profile": "full_7", "expert_order": list(order),
+              "feature_dimensions": dims, "checkpoint_provenance": provenance,
+              "assembly_identity": {"shared_source_contract": {"id": "x"},
+                                    "score_contracts": {name: {"identity": "a" * 64} for name in order}}}
+    train = SimpleNamespace(manifest={**common, "assembly_identity": {**common["assembly_identity"],
+        "ordered_source_fingerprints": rows}}, identity="a" * 64)
+    validation = SimpleNamespace(manifest={**common, "assembly_identity": {**common["assembly_identity"],
+        "ordered_source_fingerprints": [{"sample_id": "validation:b.wav", "wav_sha256": "c" * 64}]}},
+        identity="b" * 64)
+    with pytest.raises(ValueError, match=message):
+        _store_provenance(train, validation, allow_train_validation_audio_overlap=True)
+
+
+def test_global_gate_loaders_keep_all_official_train_and_validation_rows():
+    from scripts.train_moe_gating import _feature_loader
+    from training.sampler import StatefulRandomSampler
+
+    train_rows = list(range(7500))
+    validation_rows = list(range(3000))
+    train_loader = _feature_loader(
+        train_rows, batch_size=8, sampler=StatefulRandomSampler(train_rows, seed=9),
+        collate_fn=lambda batch: batch,
+    )
+    validation_loader = _feature_loader(
+        validation_rows, batch_size=8, collate_fn=lambda batch: batch,
+    )
+    train_seen = [row for batch in train_loader for row in batch]
+    validation_seen = [row for batch in validation_loader for row in batch]
+    assert len(train_seen) == len(set(train_seen)) == 7500
+    assert len(validation_seen) == len(set(validation_seen)) == 3000
 
 
 def test_inference_rejects_test_wav_seen_in_train():

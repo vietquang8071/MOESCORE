@@ -14,11 +14,16 @@ import torch
 
 from model.expert_adapters.registry import profile_contract
 from model.moe_gating_core import GatingNetwork
+from data.audio_overlap import (
+    build_train_validation_audio_overlap_diagnostic,
+    validate_audio_overlap_diagnostic,
+)
 
 
 CHECKPOINT_FORMAT_VERSION = 1
 FULL9_CHECKPOINT_FORMAT_VERSION = 2
-FULL7_CHECKPOINT_FORMAT_VERSION = 3
+LEGACY_FULL7_CHECKPOINT_FORMAT_VERSION = 3
+FULL7_CHECKPOINT_FORMAT_VERSION = 4
 FULL7_GATE_ARCHITECTURE = {"input_width": 29959, "hidden_width": 512,
                            "normalization": "LayerNorm", "activation": "ReLU",
                            "dropout": 0.1, "output_width": 7, "output": "Softmax(dim=-1)"}
@@ -29,7 +34,26 @@ _FULL7_SOURCE_FILES = (
     "data/moe_feature_store.py", "model/expert_adapters/registry.py",
     "scripts/train_moe_gating.py", "scripts/evaluate_moe_gating.py",
     "scripts/infer_moe_gating.py", "scripts/audit_full7_scores.py",
+    "data/audio_overlap.py", "training/config.py", "training/set_b_trainer.py",
+    "training/set_b_config.py", "scripts/train_set_b_residual.py",
+    "scripts/build_full7_feature_store.py",
 )
+_LEGACY_FULL7_SOURCE_CODE_SHA256 = {
+    "model/moe_gating_core.py": "fbc4038ff4579686144de476f81c22b17d431a083208282aa8168617dd77ee6d",
+    "training/moe_trainer.py": "13f1c3f8b809ef2fb57aa7e4dff6228e58bbde65388f6d55802909452fecec6c",
+    "training/moe_evaluator.py": "26f2de25aaed5ba1df541b573b3257d4384672f0bbfdb108e5a94c7a0fd5f213",
+    "training/target_transform.py": "255fc3ab19383ce4e03ac44317398d178ef51ef8a43daea0f66882cd4d8ba2f7",
+    "training/checkpoint_manager.py": "4772e92da8c26a01b2b3942d1b24f127ece867cde549a77c0387dc372b8f5f90",
+    "loss/loss_function.py": "1e162ed389dee0801c71c97a249c2c848a9fcde3690015526da21003dac9ff56",
+    "data/full7_assembler.py": "e89e6da0955e895895942f8e1d468397cbdabd8fb123b826c1d249d1db4700fa",
+    "data/full7_score_contract.py": "554f01d382a62b5247651f3f4edce8a9ab80b7a5025748348a131846b49bfba2",
+    "data/moe_feature_store.py": "b8eee3bc903a3a4f283fe30784327c359f9a22f5e5c4a4c7b8aa64e7c58da6c7",
+    "model/expert_adapters/registry.py": "d1c4f350b9669dd4ebc88b6dafc208a9e85f815a7f06a9b1f9f159252f1a0def",
+    "scripts/train_moe_gating.py": "4af42fbad55e33b10feaac54b4425317ecd9c21832e459cf89d2c73ef6223ab2",
+    "scripts/evaluate_moe_gating.py": "2567cf1c09405bd07b2a1f77b99bda7206a63feedd71e2cab1532c46bb57f594",
+    "scripts/infer_moe_gating.py": "a57d0e5b46fda6c7f76a5ab565080e6e01b6b533ef32d5ba892809a8402edfa4",
+    "scripts/audit_full7_scores.py": "7e188f1ea90dfaade180d545d688d8865732489392d5f00c526f308c1b98a53a",
+}
 
 
 def full7_source_code_sha256() -> dict[str, str]:
@@ -40,7 +64,8 @@ def full7_source_code_sha256() -> dict[str, str]:
 
 def _validate_gate_payload(payload: Mapping[str, Any], gate: GatingNetwork) -> None:
     version = payload.get("format_version")
-    if version not in {CHECKPOINT_FORMAT_VERSION, FULL9_CHECKPOINT_FORMAT_VERSION, FULL7_CHECKPOINT_FORMAT_VERSION}:
+    if version not in {CHECKPOINT_FORMAT_VERSION, FULL9_CHECKPOINT_FORMAT_VERSION,
+                       LEGACY_FULL7_CHECKPOINT_FORMAT_VERSION, FULL7_CHECKPOINT_FORMAT_VERSION}:
         raise ValueError("unsupported gating checkpoint schema")
     profile = "top1_4" if version == CHECKPOINT_FORMAT_VERSION else payload.get("expert_profile")
     order, dimensions, width = profile_contract(profile)
@@ -55,11 +80,10 @@ def _validate_gate_payload(payload: Mapping[str, Any], gate: GatingNetwork) -> N
         or not all(payload["feature_store_identity"].get(key) for key in ("train", "validation", "preprocessing_contract"))
     ):
         raise ValueError("checkpoint full_9 order, dimensions, or provenance are incompatible")
-    if version == FULL7_CHECKPOINT_FORMAT_VERSION and (
+    if version in {LEGACY_FULL7_CHECKPOINT_FORMAT_VERSION, FULL7_CHECKPOINT_FORMAT_VERSION} and (
         profile != "full_7" or payload.get("expert_order") != list(order)
         or payload.get("expert_feature_dimensions") != dimensions
         or payload.get("gate_architecture") != FULL7_GATE_ARCHITECTURE
-        or payload.get("source_code_sha256") != full7_source_code_sha256()
         or payload.get("selection_policy") != "official_validation_srcc_strict_v1_provisional"
         or not isinstance(payload.get("expert_checkpoint_provenance"), Mapping)
         or set(payload["expert_checkpoint_provenance"]) != set(order)
@@ -70,6 +94,24 @@ def _validate_gate_payload(payload: Mapping[str, Any], gate: GatingNetwork) -> N
         or set(payload["feature_store_identity"]["source_wav_sha256_by_split"]) != {"train", "validation"}
     ):
         raise ValueError("checkpoint full_7 architecture, source code, order, or provenance are incompatible")
+    if version == LEGACY_FULL7_CHECKPOINT_FORMAT_VERSION:
+        if payload.get("source_code_sha256") != _LEGACY_FULL7_SOURCE_CODE_SHA256:
+            raise ValueError("legacy Full7 checkpoint source code identity is incompatible")
+    if version == FULL7_CHECKPOINT_FORMAT_VERSION:
+        if payload.get("source_code_sha256") != full7_source_code_sha256():
+            raise ValueError("checkpoint full_7 source code identity is incompatible")
+        identity = payload.get("feature_store_identity")
+        config = payload.get("config")
+        data_config = config.get("data") if isinstance(config, Mapping) else None
+        try:
+            diagnostic = _validate_full7_overlap_identity(identity)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(f"checkpoint Full7 audio-overlap diagnostic is invalid: {exc}") from exc
+        if (not isinstance(data_config, Mapping)
+                or type(data_config.get("allow_train_validation_audio_overlap")) is not bool
+                or data_config["allow_train_validation_audio_overlap"]
+                != diagnostic["allow_train_validation_audio_overlap"]):
+            raise ValueError("checkpoint Full7 overlap policy differs from its run configuration")
 
 
 def _canonical(value: Any, field: str) -> bytes:
@@ -81,6 +123,30 @@ def _canonical(value: Any, field: str) -> bytes:
 
 def _fingerprint(value: Any, field: str) -> str:
     return hashlib.sha256(_canonical(value, field)).hexdigest()
+
+
+def _validate_full7_overlap_identity(identity: Mapping[str, Any]) -> dict[str, Any]:
+    diagnostic = validate_audio_overlap_diagnostic(identity.get("audio_overlap_diagnostic"))
+    hashes = identity.get("source_wav_sha256_by_split")
+    sample_ids = identity.get("source_sample_ids_by_split")
+    if (not isinstance(hashes, Mapping) or set(hashes) != {"train", "validation"}
+            or not isinstance(sample_ids, Mapping) or set(sample_ids) != {"train", "validation"}):
+        raise ValueError("Full7 checkpoint source audio membership is incomplete")
+    records = {}
+    for split in ("train", "validation"):
+        split_hashes, split_ids = hashes[split], sample_ids[split]
+        if (not isinstance(split_hashes, list) or not isinstance(split_ids, list)
+                or len(split_hashes) != len(split_ids)):
+            raise ValueError(f"Full7 checkpoint {split} source audio membership is invalid")
+        records[split] = [{"sample_id": sample_id, "wav_sha256": digest}
+                          for sample_id, digest in zip(split_ids, split_hashes)]
+    recomputed = build_train_validation_audio_overlap_diagnostic(
+        records["train"], records["validation"],
+        allow_train_validation_audio_overlap=diagnostic["allow_train_validation_audio_overlap"],
+    )
+    if recomputed != diagnostic:
+        raise ValueError("Full7 checkpoint audio-overlap diagnostic differs from source membership")
+    return diagnostic
 
 
 def _to_cpu(value: Any) -> Any:
@@ -154,6 +220,11 @@ class MoeCheckpointManager:
             or set(identity_body["source_wav_sha256_by_split"]) != {"train", "validation"}
         ):
             raise ValueError("full_7 checkpoint requires train/validation WAV provenance")
+        if gating_network.profile == "full_7":
+            diagnostic = _validate_full7_overlap_identity(identity_body)
+            allow_overlap = config_body.get("data", {}).get("allow_train_validation_audio_overlap")
+            if type(allow_overlap) is not bool or allow_overlap != diagnostic["allow_train_validation_audio_overlap"]:
+                raise ValueError("full_7 checkpoint configuration and overlap diagnostic differ")
         if sampler_state is not None:
             sampler_body = json.loads(_canonical(dict(sampler_state), "sampler_state").decode("utf-8"))
         else:
@@ -222,6 +293,10 @@ class MoeCheckpointManager:
         if not isinstance(payload, dict):
             raise ValueError("unsupported gating checkpoint schema")
         _validate_gate_payload(payload, gating_network)
+        if payload.get("format_version") == LEGACY_FULL7_CHECKPOINT_FORMAT_VERSION:
+            raise ValueError(
+                "legacy Full7 gate checkpoint cannot resume because it does not record the explicit train/validation audio-overlap policy"
+            )
         expected_values = (
             ("config", dict(expected_config), "configuration"),
             ("feature_store_identity", dict(expected_feature_store_identity), "feature store identity"),

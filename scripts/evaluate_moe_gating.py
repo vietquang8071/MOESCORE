@@ -55,7 +55,7 @@ def evaluate_checkpoint(config: dict, checkpoint: str, *, device_override: str |
         raise ValueError("validation feature-store identity differs from the checkpoint")
     loader = DataLoader(dataset, batch_size=config["validation"]["batch_size"], shuffle=False, num_workers=0, collate_fn=collate_moe_features)
     result = MoeGateEvaluator(gate, config["training"]["loss"]).evaluate(loader)
-    return {
+    report = {
         "status": "PASS",
         "device": str(device),
         "checkpoint": str(Path(checkpoint).resolve()),
@@ -65,6 +65,11 @@ def evaluate_checkpoint(config: dict, checkpoint: str, *, device_override: str |
         "regression_loss_normalized": result.get("regression_loss_normalized"),
         "optimizer_steps": 0,
     }
+    overlap_diagnostic = payload["feature_store_identity"].get("audio_overlap_diagnostic")
+    if isinstance(overlap_diagnostic, dict) and overlap_diagnostic.get("overlapping_sha256_count"):
+        report["validation_metrics_warning"] = overlap_diagnostic.get("warning")
+        report["audio_overlap_diagnostic_sha256"] = overlap_diagnostic.get("diagnostic_sha256")
+    return report
 
 
 def main(argv: Sequence[str] | None = None) -> int:

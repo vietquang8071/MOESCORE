@@ -3,13 +3,18 @@ import torch
 import subprocess
 import sys
 import csv
+import json
 from pathlib import Path
 
 from model.expert_adapters.set_b_residual_adapter import SetBResidualAdapter
 from model.composite_experts.set_b_residual import SetBResidualHead
 from data.set_b_cached_dataset import SetBCachedDataset
 from test_set_b_cached_dataset import synthetic_caches
-from training.set_b_trainer import SetBResidualTrainer, _source_audio_ids, load_set_b_checkpoint
+from training.set_b_trainer import (
+    SetBResidualTrainer, _evaluation_loader, _source_audio_ids,
+    _training_loader, load_set_b_checkpoint,
+)
+from training.set_b_config import load_set_b_config
 
 
 def _small_trainer():
@@ -53,6 +58,34 @@ def test_source_audio_hash_normalizes_uppercase_hex():
     assert _source_audio_ids([{"sample_id": "train:x.wav", "wav_sha256": digest}], split="train") == {
         digest.lower(): ["train:x.wav"]
     }
+
+
+def test_e6_config_defaults_overlap_policy_to_strict_and_validates_boolean(tmp_path):
+    import yaml
+    source = Path(__file__).resolve().parents[1] / "configs/set_b_residual.example.yaml"
+    raw = yaml.safe_load(source.read_text())
+    for key in ("feature_store_root", "whisper_cache_root", "output_dir"):
+        raw[key] = str(tmp_path / key)
+    config = tmp_path / "e6.yaml"
+    config.write_text(yaml.safe_dump(raw))
+    assert load_set_b_config(config)["training"]["allow_train_validation_audio_overlap"] is False
+    raw["training"]["allow_train_validation_audio_overlap"] = "yes"
+    config.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match="must be boolean"):
+        load_set_b_config(config)
+
+
+def test_e6_loaders_retain_all_7500_train_and_3000_validation_rows():
+    train_ids = range(7500)
+    validation_ids = range(3000)
+    train_loader = _training_loader(
+        train_ids, batch_size=8, num_workers=0, generator=torch.Generator().manual_seed(4),
+    )
+    validation_loader = _evaluation_loader(validation_ids, batch_size=8, num_workers=0)
+    train_seen = [int(value) for batch in train_loader for value in batch]
+    validation_seen = [int(value) for batch in validation_loader for value in batch]
+    assert len(train_seen) == len(set(train_seen)) == 7500
+    assert len(validation_seen) == len(set(validation_seen)) == 3000
 
 
 def test_compatible_laion_identity_accepts_different_split_fingerprints(tmp_path):
@@ -132,6 +165,74 @@ def test_train_validation_same_wav_bytes_rejected_before_optimization(tmp_path, 
     assert not (tmp_path / "out").exists()
 
 
+def test_experimental_overlap_trains_all_rows_and_records_warning_metadata(tmp_path):
+    shared = b"accepted experimental duplicate"
+    full9, whisper, _ = synthetic_caches(
+        tmp_path, split="train", filenames=["03768.wav", "train-only.wav"],
+        audio_payloads=[shared, b"train-only"],
+    )
+    synthetic_caches(
+        tmp_path, split="validation", filenames=["07603.wav", "validation-only.wav"],
+        audio_payloads=[shared, b"validation-only"],
+    )
+    train = SetBCachedDataset(full9, whisper, split="train")
+    validation = SetBCachedDataset(full9, whisper, split="validation")
+    original_train_ids = list(train.sample_ids)
+    original_validation_ids = list(validation.sample_ids)
+    output = tmp_path / "out"
+    trainer = _small_trainer()
+    with pytest.warns(UserWarning, match="optimistically biased"):
+        history = trainer.fit(
+            train, validation, output_dir=output, batch_size=2,
+            allow_train_validation_audio_overlap=True,
+        )
+    assert len(train) == 2 and len(validation) == 2
+    assert train.sample_ids == original_train_ids
+    assert validation.sample_ids == original_validation_ids
+    assert trainer.global_step == 30
+    assert len(history) == 30
+    diagnostic = json.loads((output / "expert6_audio_overlap_diagnostic.json").read_text())
+    assert diagnostic["status"] == "WARNING"
+    assert diagnostic["allow_train_validation_audio_overlap"] is True
+    assert diagnostic["overlapping_sha256_count"] == 1
+    assert diagnostic["affected_train_rows"] == diagnostic["affected_validation_rows"] == 1
+    assert diagnostic["overlaps"][0]["train_sample_ids"] == ["train:03768.wav"]
+    assert diagnostic["overlaps"][0]["validation_sample_ids"] == ["validation:07603.wav"]
+    best = torch.load(output / "expert6_best.pt", weights_only=False)
+    assert best["format_version"] == 2
+    assert best["training_settings"]["allow_train_validation_audio_overlap"] is True
+    assert best["audio_overlap_diagnostic"] == diagnostic
+    assert best["audio_overlap_diagnostic_sha256"] == diagnostic["diagnostic_sha256"]
+    assert best["dataset_provenance"]["train"] == train.provenance
+    assert best["dataset_provenance"]["validation"] == validation.provenance
+
+
+def test_e6_legacy_checkpoint_loads_for_inference_but_cannot_resume(tmp_path):
+    full9, whisper, _ = synthetic_caches(tmp_path, split="train")
+    synthetic_caches(tmp_path, split="validation")
+    train = SetBCachedDataset(full9, whisper, split="train")
+    validation = SetBCachedDataset(full9, whisper, split="validation")
+    output = tmp_path / "out"
+    _small_trainer().fit(train, validation, output_dir=output, batch_size=2)
+    latest_path = output / "expert6_latest.pt"
+    payload = torch.load(latest_path, weights_only=False)
+    payload["format_version"] = 1
+    payload["training_settings"].pop("allow_train_validation_audio_overlap")
+    payload.pop("audio_overlap_diagnostic")
+    payload.pop("audio_overlap_diagnostic_sha256")
+    torch.save(payload, latest_path)
+    loaded = load_set_b_checkpoint(
+        latest_path, model=SetBResidualAdapter(SetBResidualHead(hidden_dims=(8, 4), dropout=0)),
+        expected_dataset=validation,
+    )
+    assert loaded["format_version"] == 1
+    with pytest.raises(ValueError, match="legacy E6 checkpoint.*cannot resume"):
+        _small_trainer().fit(
+            train, validation, output_dir=output, batch_size=2,
+            resume_from=latest_path,
+        )
+
+
 def test_training_rejects_wrong_split_before_optimizer(tmp_path):
     trainer = SetBResidualTrainer(SetBResidualAdapter(), device="cpu")
     with pytest.raises(ValueError, match="official train"):
@@ -202,6 +303,13 @@ def test_partial_resume_preserves_best_and_rejects_changed_validation(tmp_path):
         trainer.fit(train, validation, output_dir=output, batch_size=2)
     latest = torch.load(output / "expert6_latest.pt", weights_only=False)
     assert latest["epoch"] == 2
+    policy_changed = SetBResidualTrainer(SetBResidualAdapter(SetBResidualHead(hidden_dims=(8, 4), dropout=0)), device="cpu")
+    with pytest.raises(ValueError, match="resume settings or validation cache provenance mismatch"):
+        policy_changed.fit(
+            train, validation, output_dir=output, batch_size=2,
+            allow_train_validation_audio_overlap=True,
+            resume_from=output / "expert6_latest.pt",
+        )
     resumed = SetBResidualTrainer(SetBResidualAdapter(SetBResidualHead(hidden_dims=(8, 4), dropout=0)), device="cpu")
     history = resumed.fit(train, validation, output_dir=output, batch_size=2,
                           resume_from=output / "expert6_latest.pt")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 from pathlib import Path
@@ -15,12 +16,19 @@ import torch
 from torch.utils.data import DataLoader
 
 from data.moe_expert_cache import validate_expert_cache_identity
+from data.audio_overlap import (
+    build_train_validation_audio_overlap_diagnostic,
+    emit_audio_overlap_warning,
+    raise_for_audio_overlap,
+    validate_audio_overlap_diagnostic,
+)
 from data.set_b_cached_dataset import SetBCachedDataset
 from model.composite_experts.set_b_residual import feature_order_contract
 from model.expert_adapters.set_b_residual_adapter import SetBResidualAdapter
 
 
 SELECTION_POLICY = "official_validation_mse_min_v1"
+CHECKPOINT_FORMAT_VERSION = 2
 SCORE_NORMALIZATION = {"raw_to_normalized": "(raw - 5.0) / 5.0", "normalized_to_raw": "5.0 * score + 5.0"}
 
 
@@ -43,6 +51,16 @@ def seed_everything(seed):
 def move_batch(batch, device):
     return {"component_outputs": {"top2_laion": {key: value.to(device) for key, value in batch["component_outputs"]["top2_laion"].items()}},
             "whisper_audio": batch["whisper_audio"].to(device), "whisper_text": batch["whisper_text"].to(device)}
+
+
+def _training_loader(dataset, *, batch_size, num_workers, generator):
+    return DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False,
+                      num_workers=num_workers, generator=generator)
+
+
+def _evaluation_loader(dataset, *, batch_size, num_workers):
+    return DataLoader(dataset, batch_size=batch_size, shuffle=False, drop_last=False,
+                      num_workers=num_workers)
 
 
 def _sha256(path):
@@ -90,11 +108,49 @@ def _source_audio_ids(records, *, split):
     return by_hash
 
 
-def load_set_b_checkpoint(path, *, model, expected_dataset=None, optimizer=None, map_location="cpu"):
+def load_set_b_checkpoint(path, *, model, expected_dataset=None, optimizer=None, map_location="cpu",
+                          for_resume=False):
     path = Path(path).expanduser().resolve()
     checkpoint = torch.load(path, map_location=map_location, weights_only=False)
-    if not isinstance(checkpoint, dict) or checkpoint.get("format_version") != 1:
+    if not isinstance(checkpoint, dict) or checkpoint.get("format_version") not in {1, CHECKPOINT_FORMAT_VERSION}:
         raise ValueError("unsupported E6 checkpoint")
+    if for_resume and checkpoint.get("format_version") != CHECKPOINT_FORMAT_VERSION:
+        raise ValueError(
+            "legacy E6 checkpoint cannot resume because it does not record the explicit train/validation audio-overlap policy"
+        )
+    if checkpoint.get("format_version") == CHECKPOINT_FORMAT_VERSION:
+        settings = checkpoint.get("training_settings")
+        diagnostic = validate_audio_overlap_diagnostic(checkpoint.get("audio_overlap_diagnostic"))
+        saved_provenance = checkpoint.get("dataset_provenance")
+        membership = checkpoint.get("training_membership")
+        if (not isinstance(settings, dict)
+                or type(settings.get("allow_train_validation_audio_overlap")) is not bool
+                or checkpoint.get("audio_overlap_diagnostic_sha256") != diagnostic["diagnostic_sha256"]
+                or diagnostic["allow_train_validation_audio_overlap"]
+                != settings["allow_train_validation_audio_overlap"]
+                or (diagnostic["overlapping_sha256_count"]
+                    and not settings["allow_train_validation_audio_overlap"])):
+            raise ValueError("E6 checkpoint overlap policy or diagnostic identity is inconsistent")
+        if (not isinstance(saved_provenance, dict) or set(saved_provenance) != {"train", "validation"}
+                or not isinstance(membership, dict) or set(membership) != {"train", "validation"}):
+            raise ValueError("E6 checkpoint train/validation provenance is incomplete")
+        for split in ("train", "validation"):
+            provenance = saved_provenance[split]
+            row_membership = membership[split]
+            whisper_identity = provenance.get("whisper_dataset_identity") if isinstance(provenance, dict) else None
+            if (not isinstance(provenance, dict) or provenance.get("split") != split
+                    or not isinstance(row_membership, dict)
+                    or type(row_membership.get("sample_count")) is not int
+                    or row_membership["sample_count"] <= 0
+                    or not isinstance(row_membership.get("ordered_sample_ids_sha256"), str)
+                    or re.fullmatch(r"[0-9a-f]{64}", row_membership["ordered_sample_ids_sha256"]) is None
+                    or row_membership.get("source_manifest_sha256") != provenance.get("full9_source_manifest_sha256")
+                    or not isinstance(whisper_identity, dict)
+                    or whisper_identity.get("sample_count") != row_membership["sample_count"]):
+                raise ValueError(f"E6 checkpoint {split} membership or source provenance is invalid")
+        if (diagnostic["overlapping_sha256_count"]
+                and checkpoint.get("validation_metrics_warning") != diagnostic.get("warning")):
+            raise ValueError("E6 checkpoint validation metrics lack the audio-overlap warning")
     if checkpoint.get("architecture_config") != model.head.architecture_config or checkpoint.get("feature_contract") != feature_order_contract():
         raise ValueError("E6 architecture or feature contract mismatch")
     if checkpoint.get("score_normalization") != SCORE_NORMALIZATION or checkpoint.get("selection_policy") != SELECTION_POLICY:
@@ -143,12 +199,13 @@ class SetBResidualTrainer:
         self.completed_epochs = 0
         self.best_validation_mse = math.inf
         self.best_epoch = 0
+        self.audio_overlap_diagnostic = None
 
     def evaluate_mse(self, dataset, *, batch_size=8, num_workers=0):
         self.model.eval()
         total = 0.0
         count = 0
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+        loader = _evaluation_loader(dataset, batch_size=batch_size, num_workers=num_workers)
         with torch.inference_mode():
             for raw in loader:
                 target = raw["target_normalized"].to(self.device)
@@ -165,7 +222,7 @@ class SetBResidualTrainer:
         return total / count
 
     def fit(self, train_dataset, validation_dataset, *, output_dir, epochs=30, batch_size=8,
-            num_workers=0, resume_from=None):
+            num_workers=0, resume_from=None, allow_train_validation_audio_overlap=False):
         if not isinstance(train_dataset, SetBCachedDataset) or train_dataset.split != "train":
             raise ValueError("E6 requires official train dataset")
         if not isinstance(validation_dataset, SetBCachedDataset) or validation_dataset.split != "validation":
@@ -174,15 +231,16 @@ class SetBResidualTrainer:
             raise ValueError("E6 requires exactly 30 epochs, positive batch_size and nonnegative num_workers")
         if set(train_dataset.sample_ids) & set(validation_dataset.sample_ids):
             raise ValueError("E6 train/validation sample identities overlap")
-        train_audio = _source_audio_ids(train_dataset.records, split="train")
-        validation_audio = _source_audio_ids(validation_dataset.records, split="validation")
-        shared_audio = sorted(set(train_audio) & set(validation_audio))
-        if shared_audio:
-            digest = shared_audio[0]
-            raise ValueError(
-                "E6 train/validation source audio overlap: "
-                f"train={train_audio[digest]}, validation={validation_audio[digest]}, wav_sha256={digest}"
-            )
+        if type(allow_train_validation_audio_overlap) is not bool:
+            raise ValueError("E6 allow_train_validation_audio_overlap must be boolean")
+        overlap_diagnostic = build_train_validation_audio_overlap_diagnostic(
+            train_dataset.records, validation_dataset.records,
+            allow_train_validation_audio_overlap=allow_train_validation_audio_overlap,
+        )
+        if overlap_diagnostic["overlapping_sha256_count"] and not allow_train_validation_audio_overlap:
+            raise_for_audio_overlap(overlap_diagnostic, stage="E6")
+        emit_audio_overlap_warning(overlap_diagnostic, stage="E6 training")
+        self.audio_overlap_diagnostic = overlap_diagnostic
         if (train_dataset.laion_model_identity != validation_dataset.laion_model_identity
                 or train_dataset.whisper_checkpoint_identity != validation_dataset.whisper_checkpoint_identity
                 or train_dataset.whisper_preprocessing_identity != validation_dataset.whisper_preprocessing_identity):
@@ -197,17 +255,35 @@ class SetBResidualTrainer:
         settings = {"epochs": 30, "batch_size": batch_size, "num_workers": num_workers,
                     "learning_rate": self.learning_rate, "weight_decay": self.weight_decay,
                     "gradient_clip": self.gradient_clip, "seed": self.seed,
-                    "selection_metric": "official_validation_mse", "selection_policy": SELECTION_POLICY}
+                    "selection_metric": "official_validation_mse", "selection_policy": SELECTION_POLICY,
+                    "allow_train_validation_audio_overlap": allow_train_validation_audio_overlap}
         provenance = {"train": train_dataset.provenance, "validation": validation_dataset.provenance}
+        membership = {
+            split: {
+                "sample_count": len(dataset.sample_ids),
+                "ordered_sample_ids_sha256": hashlib.sha256(json.dumps(
+                    dataset.sample_ids, ensure_ascii=False, separators=(",", ":"),
+                ).encode("utf-8")).hexdigest(),
+                "source_manifest_sha256": dataset.provenance["full9_source_manifest_sha256"],
+            }
+            for split, dataset in (("train", train_dataset), ("validation", validation_dataset))
+        }
         history = []
+        diagnostic_path = output / "expert6_audio_overlap_diagnostic.json"
+        diagnostic_path.write_text(json.dumps(overlap_diagnostic, indent=2, sort_keys=True,
+                                              ensure_ascii=False) + "\n", encoding="utf-8")
         if resume_from is not None:
             resume_path = Path(resume_from).expanduser().resolve()
             if resume_path != latest_path:
                 raise ValueError("resume requires output_dir/expert6_latest.pt")
             checkpoint = load_set_b_checkpoint(resume_path, model=self.model, optimizer=self.optimizer,
-                                               expected_dataset=train_dataset, map_location=self.device)
+                                               expected_dataset=train_dataset, map_location=self.device,
+                                               for_resume=True)
             if (checkpoint.get("checkpoint_role") != "latest" or checkpoint.get("training_settings") != settings
-                    or checkpoint.get("dataset_provenance") != provenance):
+                    or checkpoint.get("dataset_provenance") != provenance
+                    or checkpoint.get("training_membership") != membership
+                    or checkpoint.get("audio_overlap_diagnostic") != overlap_diagnostic
+                    or checkpoint.get("audio_overlap_diagnostic_sha256") != overlap_diagnostic["diagnostic_sha256"]):
                 raise ValueError("E6 resume settings or validation cache provenance mismatch")
             if not best_path.is_file() or checkpoint.get("best_checkpoint_sha256") != _sha256(best_path):
                 raise ValueError("E6 best checkpoint missing or modified")
@@ -221,8 +297,8 @@ class SetBResidualTrainer:
         for epoch in range(self.completed_epochs + 1, 31):
             seed_everything(self.seed + epoch - 1)
             generator = torch.Generator().manual_seed(self.seed + epoch - 1)
-            loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=False,
-                                num_workers=num_workers, generator=generator)
+            loader = _training_loader(train_dataset, batch_size=batch_size, num_workers=num_workers,
+                                      generator=generator)
             self.model.train()
             for raw in loader:
                 target = raw["target_normalized"].to(self.device)
@@ -244,17 +320,25 @@ class SetBResidualTrainer:
                 improved = True
             else:
                 improved = False
-            history.append({"epoch": epoch, "train_mse": train_mse, "validation_mse": validation_mse})
-            payload = {"format_version": 1, "model_state_dict": self.model.state_dict(),
+            metric_row = {"epoch": epoch, "train_mse": train_mse, "validation_mse": validation_mse}
+            if overlap_diagnostic["overlapping_sha256_count"]:
+                metric_row["validation_metrics_warning"] = overlap_diagnostic["warning"]
+            history.append(metric_row)
+            payload = {"format_version": CHECKPOINT_FORMAT_VERSION, "model_state_dict": self.model.state_dict(),
                        "optimizer_state_dict": self.optimizer.state_dict(),
                        "architecture_config": self.model.head.architecture_config,
                        "feature_contract": feature_order_contract(), "score_normalization": SCORE_NORMALIZATION,
                        "epoch": epoch, "global_step": self.global_step, "seed": self.seed,
                        "training_settings": settings, "dataset_provenance": provenance,
+                       "training_membership": membership,
+                       "audio_overlap_diagnostic": overlap_diagnostic,
+                       "audio_overlap_diagnostic_sha256": overlap_diagnostic["diagnostic_sha256"],
                        "train_mse": train_mse, "validation_mse": validation_mse,
                        "best_validation_mse": self.best_validation_mse, "best_epoch": self.best_epoch,
                        "validation_history": list(history), "selection_metric": "official_validation_mse",
                        "selection_policy": SELECTION_POLICY}
+            if overlap_diagnostic["overlapping_sha256_count"]:
+                payload["validation_metrics_warning"] = overlap_diagnostic["warning"]
             if improved:
                 _atomic_save({**payload, "checkpoint_role": "best"}, best_path)
             best_hash = _sha256(best_path)

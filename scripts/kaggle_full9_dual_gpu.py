@@ -22,8 +22,8 @@ if str(PROJECT_ROOT) not in sys.path:
 from data.moe_feature_store import _atomic_json, validate_feature_store
 from model.expert_adapters.registry import EXPERT_PROFILES, profile_contract
 from scripts.extract_moe_feature_store import (
-    assembly_store_root, assemble_stores, completed_stores_match, job_identity,
-    prepare_job,
+    assembly_store_root, assemble_stores, audit_full10_cache_identities,
+    completed_stores_match, job_identity, prepare_job,
 )
 
 
@@ -50,6 +50,21 @@ def validate_worker_devices(mapping, order, *, require_two=True):
     if require_two and set(mapping.values()) != {"cuda:0", "cuda:1"}:
         raise ValueError("Both cuda:0 and cuda:1 must receive expert work")
     return dict(mapping)
+
+
+def worker_cache_statistics(runtime, expected_shards):
+    """Report shard reuse from worker validation, never from expected totals."""
+    if type(expected_shards) is not int or expected_shards < 0:
+        raise ValueError("expected_shards must be a nonnegative integer")
+    reused = runtime.get("reused_validated_shards", 0)
+    quarantined = runtime.get("quarantined_invalid_shards", 0)
+    if type(reused) is not int or reused < 0 or reused > expected_shards:
+        raise ValueError("worker reused shard count exceeds expected shards")
+    if type(quarantined) is not int or quarantined < 0:
+        raise ValueError("worker quarantined shard count must be a nonnegative integer")
+    return {"expected_shards": expected_shards, "reused_shards": reused,
+            "extracted_shards": expected_shards - reused,
+            "quarantined_invalid_shards": quarantined}
 
 
 def require_kaggle_dual_gpu():
@@ -120,9 +135,15 @@ def extract_dual_gpu(config_path, dataset_root, output_root, *, worker_devices=N
     )
     job_id = job_identity(job)
     final_root = assembly_store_root(output_root, job)
+    cache_identity_audit = audit_full10_cache_identities(job, output_root) if profile == "full_10" else None
     if completed_stores_match(job, manifests, output_root):
-        return {"status": "PASS", "reused_complete_store": True, "assembly_id": job_id,
-                "feature_store_root": str(final_root), "worker_devices": mapping}
+        return {"status": "PASS", "profile": profile, "expert_order": list(order),
+                "feature_width": profile_contract(profile)[2],
+                "reused_complete_store": True, "assembly_id": job_id,
+                "feature_store_root": str(final_root), "worker_devices": mapping,
+                "cache_identity_audit": cache_identity_audit,
+                "cache_reuse": {"complete_store_reused": True,
+                                "per_expert_shards_counted": False}}
     script = PROJECT_ROOT / "scripts/extract_moe_feature_store.py"
     log_root = output_root / "logs" / job_id
     log_root.mkdir(parents=True, exist_ok=True)
@@ -141,14 +162,20 @@ def extract_dual_gpu(config_path, dataset_root, output_root, *, worker_devices=N
         runtime_path = output_root / "feature_cache/experts" / expert / identity["cache_id"] / "runtime.json"
         runtime = json.loads(runtime_path.read_text()) if result.returncode == 0 and runtime_path.is_file() else {}
         snapshots = [item.get("cuda", {}) for item in runtime.get("memory", [])]
+        expected_shards = sum((len(source["records"]) + job["shard_size"] - 1) // job["shard_size"]
+                              for source in manifests.values())
+        cache_stats = worker_cache_statistics(runtime, expected_shards) if runtime.get("status") == "PASS" else {
+            "expected_shards": expected_shards, "reused_shards": 0,
+            "extracted_shards": 0, "quarantined_invalid_shards": 0,
+        }
         report = {"status": "PASS" if result.returncode == 0 and runtime.get("status") == "PASS" else "FAIL",
                   "expert": expert, "device": device, "gpu_name": gpu_names[device],
                   "checkpoint_provenance": identity["checkpoint_provenance"],
                   "batch_size": job["batch_sizes"][expert], "started_at_utc": start,
                   "completed_at_utc": datetime.now(timezone.utc).isoformat(),
                   "sample_count_by_split": runtime.get("sample_count_by_split", {}),
-                  "validated_shards": sum((len(source["records"]) + job["shard_size"] - 1) // job["shard_size"]
-                                          for source in manifests.values()) if runtime.get("status") == "PASS" else 0,
+                  "validated_shards": cache_stats["reused_shards"],
+                  "cache_shards": cache_stats,
                   "model_constructed": runtime.get("model_constructed"),
                   "peak_allocated_vram_bytes": max((v.get("peak_allocated_bytes", 0) for v in snapshots), default=0),
                   "peak_reserved_vram_bytes": max((v.get("peak_reserved_bytes", 0) for v in snapshots), default=0),
@@ -169,8 +196,14 @@ def extract_dual_gpu(config_path, dataset_root, output_root, *, worker_devices=N
     except BaseException as exc:
         _atomic_json(log_root / "stage.json", {"status": "FAIL", "error": f"{type(exc).__name__}: {exc}"})
         raise
-    report = {"status": "PASS", "assembly_id": job_id, "feature_store_root": str(final_root),
+    report = {"status": "PASS", "profile": profile, "expert_order": list(order),
+              "feature_width": profile_contract(profile)[2],
+              "assembly_id": job_id, "feature_store_root": str(final_root),
               "worker_devices": mapping, "gpu_names": gpu_names, "workers": worker_reports,
+              "cache_identity_audit": cache_identity_audit,
+              "cache_reuse": {"reused_shards": sum(item["cache_shards"]["reused_shards"] for item in worker_reports.values()),
+                              "extracted_shards": sum(item["cache_shards"]["extracted_shards"] for item in worker_reports.values()),
+                              "quarantined_invalid_shards": sum(item["cache_shards"]["quarantined_invalid_shards"] for item in worker_reports.values())},
               "splits": {name: {"rows": len(manifests[name]["records"]),
                                   "store_identity": value["store_identity_sha256"]}
                          for name, value in splits.items()}}

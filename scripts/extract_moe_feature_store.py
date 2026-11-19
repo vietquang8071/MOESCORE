@@ -631,6 +631,96 @@ def prepare_job(config_path, dataset_root, output_root, *, batch_sizes=None, sha
     return config, job, manifests
 
 
+def _flatten_identity(value, prefix=""):
+    if isinstance(value, dict):
+        flattened = {}
+        for key in sorted(value):
+            child = f"{prefix}.{key}" if prefix else str(key)
+            flattened.update(_flatten_identity(value[key], child))
+        return flattened
+    if isinstance(value, (list, tuple)):
+        return {prefix: list(value)}
+    return {prefix: value}
+
+
+def compare_expert_cache_identity(previous, expected):
+    """Return an auditable exact comparison of two per-expert cache identities."""
+    old, new = _flatten_identity(previous), _flatten_identity(expected)
+    keys = sorted(set(old) | set(new))
+    differences = [key for key in keys if old.get(key, object()) != new.get(key, object())]
+    return {"compatible": not differences, "differences": differences}
+
+
+def audit_full10_cache_identities(job, output_root):
+    """Compare available Full9 identities to the prepared Full10 identities.
+
+    Sample manifests are already content-addressed by ``prepare_job``. This
+    function intentionally reads only prior job identity JSON, leaving the
+    worker to verify every shard and sidecar before reuse.
+    """
+    if job.get("expert_profile") != "full_10":
+        raise ValueError("Full10 cache audit requires a full_10 job")
+    jobs_root = Path(output_root) / "feature_cache" / "jobs"
+    current_job_id = job_identity(job)
+    candidates = []
+    invalid_jobs = []
+    if jobs_root.is_dir():
+        for path in sorted(jobs_root.glob("*.json")):
+            try:
+                previous = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                invalid_jobs.append({"job_path": str(path), "reason": "unreadable JSON"})
+                continue
+            if previous.get("expert_profile") not in {"full_9", "full_10"}:
+                continue
+            try:
+                previous_job_id = job_identity(previous)
+            except (KeyError, TypeError, ValueError) as exc:
+                invalid_jobs.append({"job_path": str(path), "reason": f"invalid job identity: {exc}"})
+                continue
+            if previous_job_id == current_job_id:
+                continue
+            report = {}
+            for expert in EXPERT_PROFILES["full_9"]:
+                old = previous.get("expert_cache_identities", {}).get(expert)
+                new = job.get("expert_cache_identities", {}).get(expert)
+                if old is not None and new is not None:
+                    report[expert] = compare_expert_cache_identity(old, new)
+            if previous.get("expert_profile") == "full_10":
+                old = previous.get("expert_cache_identities", {}).get("m2d_lora_coral")
+                new = job.get("expert_cache_identities", {}).get("m2d_lora_coral")
+                if old is not None and new is not None:
+                    report["m2d_lora_coral"] = compare_expert_cache_identity(old, new)
+            candidates.append({"job_path": str(path), "job_identity": previous_job_id,
+                               "source_profile": previous.get("expert_profile"),
+                               "experts": report})
+    return {"status": "PASS", "previous_jobs_examined": len(candidates),
+            "invalid_job_records": invalid_jobs, "candidates": candidates}
+
+
+def quarantine_invalid_cache_shard(path, *, cache_root, reason):
+    """Move a corrupt shard and sidecar aside so a same-identity shard can resume."""
+    import time
+
+    source = Path(path)
+    root = Path(cache_root).resolve()
+    try:
+        relative = source.resolve(strict=False).relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Cache shard must be inside cache_root") from exc
+    quarantine = root / "quarantine" / "invalid" / f"{time.time_ns()}-{source.stem}"
+    quarantine.mkdir(parents=True, exist_ok=False)
+    moved = []
+    for candidate in (source, source.with_suffix(".json")):
+        if candidate.exists():
+            destination = quarantine / candidate.name
+            candidate.replace(destination)
+            moved.append(str(destination))
+    _atomic_json(quarantine / "reason.json", {"reason": str(reason), "source": str(relative),
+                                               "moved_files": moved})
+    return str(quarantine)
+
+
 def load_chunk(path, *, expert, records, identity, sample_identity=None):
     """Load only schema-v2 per-expert shards; reject legacy global shards."""
     if not isinstance(identity, dict) or "cache_id" not in identity:
@@ -713,6 +803,7 @@ def extract_worker(config, job, manifests, dataset_root, output_root, expert, de
     report_path = Path(output_root) / "feature_cache" / "experts" / expert / cache_id / "runtime.json"
     pending = []
     reused_shards = 0
+    quarantined_shards = 0
     for split, manifest in manifests.items():
         for index, start in enumerate(range(0, len(manifest["records"]), job["shard_size"])):
             records = manifest["records"][start:start + job["shard_size"]]
@@ -731,13 +822,19 @@ def extract_worker(config, job, manifests, dataset_root, output_root, expert, de
                 sample_identity_sha256=sample_identity["sample_identity_sha256"],
             )
             if path.exists() or path.with_suffix(".json").exists():
-                load_chunk(
-                    path, expert=expert, records=records, identity=expert_identity,
-                    sample_identity=sample_identity,
-                )
-                reused_shards += 1
-            else:
-                pending.append((split, index, start, records, path, sample_identity))
+                try:
+                    load_chunk(
+                        path, expert=expert, records=records, identity=expert_identity,
+                        sample_identity=sample_identity,
+                    )
+                    reused_shards += 1
+                    continue
+                except Exception as exc:
+                    quarantine_invalid_cache_shard(
+                        path, cache_root=Path(output_root) / "feature_cache", reason=exc
+                    )
+                    quarantined_shards += 1
+            pending.append((split, index, start, records, path, sample_identity))
     if not pending:
         report = {
             "status": "PASS",
@@ -749,7 +846,9 @@ def extract_worker(config, job, manifests, dataset_root, output_root, expert, de
             "device": str(device),
             "batch_size": job["batch_sizes"][expert],
             "sample_count_by_split": {split: len(manifest["records"]) for split, manifest in manifests.items()},
-            "reused_validated_shards": True,
+            "reused_validated_shards": reused_shards,
+            "newly_extracted_shards": 0,
+            "quarantined_invalid_shards": quarantined_shards,
             "validated_shards": reused_shards,
             "model_constructed": False,
         }
@@ -789,7 +888,10 @@ def extract_worker(config, job, manifests, dataset_root, output_root, expert, de
               "sample_count_by_split": {s: len(m["records"]) for s, m in manifests.items()},
               "model_class": type(getattr(adapter, "original_model", getattr(adapter, "model", adapter))).__name__,
               "module_origins": origins, "memory": measurements, "assembly_job_identity": identity,
-              "reused_validated_shards": reused_shards, "model_constructed": True}
+              "reused_validated_shards": reused_shards,
+              "newly_extracted_shards": len(pending),
+              "quarantined_invalid_shards": quarantined_shards,
+              "model_constructed": True}
     _atomic_json(report_path, report)
     datasets = {}
     for split in manifests:

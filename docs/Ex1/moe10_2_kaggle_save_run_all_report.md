@@ -2,6 +2,8 @@
 
 Ngày: 2026-11-20 | Nhánh: `feature/moe-10-m2d-lora-coral` | Commit nền lúc bắt đầu: `1b9b3def32a900bb748f63e1aec967331845943b`
 
+Commit triển khai được pin để Kaggle clone: `867cc84d00d0cf00e53aed183e04f69f9287948e`.
+
 ## 1. Kết quả
 
 Notebook Full10 đã được cập nhật để chạy theo thứ tự tự động từ kernel mới: kiểm tra Python/CUDA, checkout source theo SHA, cài dependencies phù hợp, xác minh Kaggle Inputs và checkpoint, khôi phục HF cache v2, preflight offline, smoke hai GPU, khôi phục cache cũ tùy chọn, trích xuất/resume Full10, train gate, đánh giá validation và suy luận test không nhãn.
@@ -120,23 +122,22 @@ Ngoài pytest, test notebook parse JSON, compile mọi code cell, yêu cầu out
 
 ## 9. Cách chạy trên Kaggle
 
-1. Commit/publish code của nhánh `feature/moe-10-m2d-lora-coral` sau khi review. Không có push nào được thực hiện trong công việc này.
-2. Cập nhật `REPO_COMMIT_SHA` ở cell đầu thành SHA đầy đủ của commit triển khai đã được publish (`git rev-parse HEAD`). Notebook từ chối checkout khác SHA hoặc source không sạch.
-3. Tạo notebook Kaggle từ `notebooks/MOESCORE_Full10_Kaggle.ipynb`; attach XACLE dataset, `xacle-weights`, `moescore-hf-text-cache-v2`, và dataset riêng tư có `m2d-lora-Nam.pt`. Optional: attach cache Full9 nếu muốn thử reuse.
-4. Nếu Expert 10 Input có duy nhất file đúng tên, để `EXPERT10_CHECKPOINT=None`. Nếu có file trùng tên ở nhiều Input, đặt thành đường dẫn tuyệt đối tới đúng file; SHA vẫn phải khớp.
-5. Bật Internet để checkout/cài package, chọn hai GPU T4, giữ các cờ mặc định trong cell đầu.
-6. Chọn **Save Version → Save & Run All**. Theo dõi `run_summary.json` và log; chỉ coi một stage thành công khi status PASS và artifact kiểm tra đã tồn tại.
+1. Source triển khai đã commit trên nhánh `feature/moe-10-m2d-lora-coral`; `REPO_COMMIT_SHA` trong cell đầu trỏ chính xác tới commit `867cc84d00d0cf00e53aed183e04f69f9287948e`.
+2. Tạo notebook Kaggle từ `notebooks/MOESCORE_Full10_Kaggle.ipynb`; attach XACLE dataset, `xacle-weights`, `moescore-hf-text-cache-v2`, và dataset riêng tư có `m2d-lora-Nam.pt`. Optional: attach cache Full9 nếu muốn thử reuse.
+3. Nếu Expert 10 Input có duy nhất file đúng tên, để `EXPERT10_CHECKPOINT=None`. Nếu có file trùng tên ở nhiều Input, đặt thành đường dẫn tuyệt đối tới đúng file; SHA vẫn phải khớp.
+4. Bật Internet để checkout/cài package, chọn hai GPU T4, giữ các cờ mặc định trong cell đầu.
+5. Chọn **Save Version → Save & Run All**. Theo dõi `run_summary.json` và log; chỉ coi một stage thành công khi status PASS và artifact kiểm tra đã tồn tại.
 
 Các code cell không yêu cầu thao tác thủ công hoặc restart giữa chừng. Nếu dependency installer phát hiện phiên bản module đã import bị thay đổi, nó dừng sớm và yêu cầu chạy kernel mới; Save & Run All tạo kernel mới nên không cần xử lý bằng tay giữa cell.
 
 ## 10. Giới hạn còn lại
 
 - Không có Kaggle remote job hoặc GPU T4x2 nào được khởi chạy; smoke/full extraction/train/evaluation trên GPU chưa được xác nhận.
-- `REPO_COMMIT_SHA` hiện vẫn là commit nền `1b9b3def32a900bb748f63e1aec967331845943b`; cần cập nhật sang commit chứa các thay đổi MOE-10.2 sau khi commit/publish. Đây là điều kiện để Kaggle clone đúng helper cache mới; notebook cố ý không tự dùng `main` hoặc source cũ.
+- Notebook clone commit implementation `867cc84d00d0cf00e53aed183e04f69f9287948e`, không clone `main`; Kaggle job chưa được chạy để xác nhận hành vi trên runtime T4 hiện tại.
 - Người dùng cần gắn Expert 10 private Kaggle Input; đường dẫn và SHA đã ghi trong mục 3. Không upload checkpoint lên Kaggle Dataset công khai.
 - Full10 metrics và Full9-vs-Full10 delta chưa được đo. Các số Full9 trong mục 2 chỉ là kết quả tham chiếu từ notebook đã chạy.
 - Chưa xác minh notebook thực thi thành công bằng toàn bộ Kaggle private Inputs và phiên bản Kaggle runtime hiện tại.
 
 ### Trạng thái mức độ sẵn sàng
 
-**Code và local tests sẵn sàng.** Sau khi commit/publish feature branch, cập nhật `REPO_COMMIT_SHA`, gắn đúng private Inputs và chọn hai GPU, notebook có thể chạy Save & Run All. Chưa thể gọi Full10 là “đã train/đã benchmark” trước khi Kaggle pipeline hoàn tất.
+**Code và local tests sẵn sàng; implementation commit đã được tạo.** Gắn đúng private Inputs, bật hai GPU và chạy Save & Run All để xác minh trên Kaggle. Chưa thể gọi Full10 là “đã train/đã benchmark” trước khi pipeline hoàn tất.

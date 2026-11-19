@@ -31,6 +31,7 @@ from model.expert_adapters.registry import (
 
 FEATURE_STORE_SCHEMA_VERSION = 1
 FULL9_FEATURE_STORE_SCHEMA_VERSION = 2
+FULL7_FEATURE_STORE_SCHEMA_VERSION = 3
 _ARRAY_FILES = ("scores.npy", "features.npy", "labels_raw.npy", "num_class.npy")
 
 
@@ -153,8 +154,9 @@ class MoeFeatureStoreWriter:
         self.split = split
         self.profile = profile
         self.expert_order, self.feature_dimensions, self.feature_width = profile_contract(profile)
-        self.schema_version = (FEATURE_STORE_SCHEMA_VERSION if profile == "top1_4"
-                               else FULL9_FEATURE_STORE_SCHEMA_VERSION)
+        self.schema_version = {"top1_4": FEATURE_STORE_SCHEMA_VERSION,
+                               "full_9": FULL9_FEATURE_STORE_SCHEMA_VERSION,
+                               "full_7": FULL7_FEATURE_STORE_SCHEMA_VERSION}[profile]
         self.split_root = self.root / split
         self.shards_root = self.split_root / "shards"
         self.expected_sample_ids = _ids(expected_sample_ids, split=split, field="expected_sample_ids")
@@ -183,6 +185,28 @@ class MoeFeatureStoreWriter:
             or not isinstance(self.assembly_identity, dict)
         ):
             raise ValueError("full_9 store requires ordered expert cache identities and assembly identity")
+        if profile == "full_7":
+            assembly = self.assembly_identity
+            if not isinstance(assembly, dict) or not all(assembly.get(key) for key in (
+                "source_full9_store_identity", "source_whisper_manifest_sha256",
+                "score_contracts", "shared_source_contract", "ordered_source_fingerprints", "head_membership",
+            )) or not isinstance(assembly["score_contracts"], dict) or set(assembly["score_contracts"]) != set(self.expert_order):
+                raise ValueError("full_7 store requires complete assembly and score contracts")
+            rows = assembly["ordered_source_fingerprints"]
+            if (not isinstance(rows, list) or [row.get("sample_id") for row in rows] != self.expected_sample_ids
+                    or any(not isinstance(row, dict) or any(
+                        not isinstance(row.get(field), str) or len(row[field]) != 64
+                        or any(character not in "0123456789abcdef" for character in row[field].lower())
+                        for field in ("wav_sha256", "caption_sha256")) for row in rows)):
+                raise ValueError("full_7 ordered source WAV/caption fingerprints are invalid")
+            membership = assembly["head_membership"]
+            if not isinstance(membership, dict) or set(membership) != {"expert5", "expert6"} or any(
+                not isinstance(membership[name], dict) or len(membership[name].get("per_row", [])) != len(rows)
+                for name in membership):
+                raise ValueError("full_7 E5/E6 row membership provenance is incomplete")
+            from data.full7_score_contract import validate_score_contracts
+            validate_score_contracts(assembly["score_contracts"],
+                                     synthetic=bool(assembly.get("synthetic_provenance", False)))
         existing_manifest_path = self.split_root / "manifest.json"
         if existing_manifest_path.is_file():
             existing_manifest = validate_feature_store(self.root, split=self.split)
@@ -232,9 +256,11 @@ class MoeFeatureStoreWriter:
         feature_array = _numeric_array(features, "features", np.dtype(np.float32), (count, self.feature_width))
         label_array = None
         if labels_raw is None:
-            if self.split == "train":
+            if self.split == "train" or (self.profile == "full_7" and self.split == "validation"):
                 raise ValueError("training feature-store shards require raw labels")
         else:
+            if self.profile == "full_7" and self.split == "test":
+                raise ValueError("full_7 test store must remain label-free")
             label_array = _numeric_array(labels_raw, "labels_raw", np.dtype(np.float32), (count,))
             if np.any(label_array < 0.0) or np.any(label_array > 10.0):
                 raise ValueError("labels_raw must remain on the original [0,10] scale")
@@ -259,6 +285,11 @@ class MoeFeatureStoreWriter:
                 metadata.get("sample_ids") != selected_ids
                 or metadata.get("wave_file_names") != names
                 or existing_hashes != content_hashes
+                or (self.profile == "full_7" and metadata.get("assembly_contract_sha256") !=
+                    _sha256_bytes(_canonical_json(self.assembly_identity)))
+                or (self.profile == "full_7" and any(
+                    not (target / filename).is_file() or _sha256_file(target / filename) != metadata.get("file_sha256", {}).get(filename)
+                    for filename in arrays))
             ):
                 raise ValueError(f"existing shard {shard_index} differs; refusing non-idempotent resume")
             return target
@@ -282,6 +313,8 @@ class MoeFeatureStoreWriter:
                 "array_content_sha256": content_hashes,
                 "file_sha256": file_hashes,
             }
+            if self.profile == "full_7":
+                metadata["assembly_contract_sha256"] = _sha256_bytes(_canonical_json(self.assembly_identity))
             _atomic_json(temp / "metadata.json", metadata)
             os.replace(temp, target)
         except Exception:
@@ -301,6 +334,8 @@ class MoeFeatureStoreWriter:
             metadata = json.loads((shard_dir / "metadata.json").read_text(encoding="utf-8"))
             if metadata.get("shard_index") != expected_index or metadata.get("split") != self.split:
                 raise ValueError("shard indices must be contiguous and split identity must match")
+            if self.profile == "full_7" and metadata.get("assembly_contract_sha256") != _sha256_bytes(_canonical_json(self.assembly_identity)):
+                raise ValueError("full_7 partial shard source identity differs")
             ids = _ids(metadata.get("sample_ids", []), split=self.split)
             ordered_ids.extend(ids)
             has_labels = "labels_raw.npy" in metadata.get("array_files", [])
@@ -352,6 +387,17 @@ class MoeFeatureStoreWriter:
                 "assembly_identity": self.assembly_identity,
                 "source_manifest_identity": self.source_manifest_sha256,
             })
+        if self.profile == "full_7":
+            body.update({
+                "expert_profile": "full_7",
+                "score_width": len(self.expert_order),
+                "labels_scale": "raw_0_to_10" if labels_present else None,
+                "assembly_identity": self.assembly_identity,
+                "core_assembly_contract_sha256": _sha256_bytes(_canonical_json(self.assembly_identity)),
+                "source_full9_store_identity": self.assembly_identity["source_full9_store_identity"],
+                "source_whisper_manifest_sha256": self.assembly_identity["source_whisper_manifest_sha256"],
+                "score_contracts": self.assembly_identity["score_contracts"],
+            })
         body["store_identity_sha256"] = _sha256_bytes(_canonical_json(body))
         manifest_path = self.split_root / "manifest.json"
         _atomic_json(manifest_path, body)
@@ -385,10 +431,29 @@ def validate_feature_store(
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"feature-store manifest is unreadable: {exc}") from exc
     version = manifest.get("schema_version")
-    if version not in {FEATURE_STORE_SCHEMA_VERSION, FULL9_FEATURE_STORE_SCHEMA_VERSION}:
+    if version not in {FEATURE_STORE_SCHEMA_VERSION, FULL9_FEATURE_STORE_SCHEMA_VERSION, FULL7_FEATURE_STORE_SCHEMA_VERSION}:
         raise ValueError("unsupported feature-store schema version")
     profile = "top1_4" if version == FEATURE_STORE_SCHEMA_VERSION else manifest.get("expert_profile")
     order, dimensions, feature_width = profile_contract(profile)
+    if version == FULL7_FEATURE_STORE_SCHEMA_VERSION:
+        assembly = manifest.get("assembly_identity")
+        if (profile != "full_7" or manifest.get("score_width") != 7
+                or not isinstance(assembly, dict)
+                or not all(assembly.get(key) for key in (
+                    "source_full9_store_identity", "source_whisper_manifest_sha256",
+                    "score_contracts", "shared_source_contract", "ordered_source_fingerprints", "head_membership"))
+                or not isinstance(assembly.get("score_contracts"), dict)
+                or set(assembly["score_contracts"]) != set(order)
+                or manifest.get("core_assembly_contract_sha256") != _sha256_bytes(_canonical_json(assembly))
+                or manifest.get("source_full9_store_identity") != assembly["source_full9_store_identity"]
+                or manifest.get("source_whisper_manifest_sha256") != assembly["source_whisper_manifest_sha256"]
+                or manifest.get("score_contracts") != assembly["score_contracts"]):
+            raise ValueError("full_7 assembly, source, or score contract is incomplete")
+        from data.full7_score_contract import validate_score_contracts
+        validate_score_contracts(assembly["score_contracts"],
+                                 synthetic=bool(assembly.get("synthetic_provenance", False)))
+        if manifest.get("labels_scale") != ("raw_0_to_10" if split != "test" else None):
+            raise ValueError("full_7 label scale contract mismatch")
     if version == FULL9_FEATURE_STORE_SCHEMA_VERSION:
         from data.moe_expert_cache import validate_assembly_identity, _expert_cache_id
         cache_ids = manifest.get("per_expert_cache_identities")
@@ -431,6 +496,8 @@ def validate_feature_store(
         raise ValueError(f"{split} feature store is missing required labels")
     if split == "train" and manifest.get("labels_present") is not True:
         raise ValueError("training feature store must include raw labels")
+    if version == FULL7_FEATURE_STORE_SCHEMA_VERSION and manifest.get("labels_present") is not (split != "test"):
+        raise ValueError("full_7 train/validation require labels and test forbids them")
     shards = manifest.get("shards")
     if not isinstance(shards, list) or not shards:
         raise ValueError("feature store must contain at least one shard")
@@ -450,6 +517,8 @@ def validate_feature_store(
         if (shard_meta.get("schema_version") != version or shard_meta.get("split") != split
                 or shard_meta.get("shard_index") != expected_index):
             raise ValueError("feature-store shard provenance mismatch")
+        if version == FULL7_FEATURE_STORE_SCHEMA_VERSION and shard_meta.get("assembly_contract_sha256") != manifest.get("core_assembly_contract_sha256"):
+            raise ValueError("full_7 shard assembly/source identity mismatch")
         ids = _ids(shard_meta.get("sample_ids", []), split=split)
         names = _filenames(shard_meta.get("wave_file_names", []), len(ids))
         if ids != shard.get("sample_ids") or names != shard.get("wave_file_names") or len(ids) != shard.get("count"):
@@ -499,11 +568,31 @@ def validate_feature_store(
             raise ValueError("store manifest declares labels but a shard has no labels")
     if not seen_ids:
         raise ValueError("feature store has no sample identities")
+    if version == FULL7_FEATURE_STORE_SCHEMA_VERSION:
+        rows = manifest["assembly_identity"]["ordered_source_fingerprints"]
+        ordered_ids = [sample_id for shard in shards for sample_id in shard["sample_ids"]]
+        if (not isinstance(rows, list) or [row.get("sample_id") for row in rows] != ordered_ids
+                or any(not isinstance(row, dict) or any(
+                    not isinstance(row.get(field), str) or len(row[field]) != 64
+                    or any(character not in "0123456789abcdef" for character in row[field].lower())
+                    for field in ("wav_sha256", "caption_sha256")) for row in rows)):
+            raise ValueError("full_7 ordered source WAV/caption fingerprint mismatch")
+        membership = manifest["assembly_identity"]["head_membership"]
+        if not isinstance(membership, dict) or set(membership) != {"expert5", "expert6"} or any(
+            not isinstance(membership[name], dict) or len(membership[name].get("per_row", [])) != len(rows)
+            for name in membership):
+            raise ValueError("full_7 E5/E6 row membership provenance is incomplete")
     return manifest
 
 
 def preprocessing_contract(manifest: Mapping[str, Any]) -> Any:
     """Return split-independent inference provenance for checkpoint comparison."""
+    if manifest.get("expert_profile") == "full_7":
+        assembly = manifest["assembly_identity"]
+        return {"shared_source_contract": assembly["shared_source_contract"],
+                "score_contracts": assembly["score_contracts"],
+                "checkpoint_provenance": manifest["checkpoint_provenance"],
+                "core_assembly_contract": "full7_v1"}
     cache = manifest.get("per_expert_cache_identities")
     if isinstance(cache, Mapping):
         return {name: cache[name]["cache_id"] if isinstance(cache[name], Mapping) else cache[name]
@@ -597,6 +686,7 @@ class MoeFeatureStoreDataset(Dataset):
 __all__ = [
     "FEATURE_STORE_SCHEMA_VERSION",
     "FULL9_FEATURE_STORE_SCHEMA_VERSION",
+    "FULL7_FEATURE_STORE_SCHEMA_VERSION",
     "MoeFeatureStoreDataset",
     "MoeFeatureStoreWriter",
     "validate_feature_store",

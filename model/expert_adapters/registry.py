@@ -54,14 +54,31 @@ EXPERT_FEATURE_DIMS_FULL9 = MappingProxyType(
     }
 )
 EXPECTED_FULL9_FEATURE_WIDTH = sum(EXPERT_FEATURE_DIMS_FULL9.values())
-EXPERT_PROFILES = MappingProxyType({"top1_4": EXPERT_ORDER, "full_9": FULL9_EXPERT_ORDER})
+FULL7_EXPERT_ORDER = tuple(f"expert{index}" for index in range(1, 8))
+FULL7_FEATURE_DIMS = MappingProxyType({
+    **dict(EXPERT_FEATURE_DIMS),
+    "expert5": 11267,
+    "expert6": 4609,
+    "expert7": 3073,
+})
+FULL7_FEATURE_WIDTH = sum(FULL7_FEATURE_DIMS.values())
+EXPERT_PROFILES = MappingProxyType({"top1_4": EXPERT_ORDER, "full_9": FULL9_EXPERT_ORDER,
+                                    "full_7": FULL7_EXPERT_ORDER})
 
 
 def profile_contract(profile: str = "top1_4") -> tuple[tuple[str, ...], dict[str, int], int]:
     if profile not in EXPERT_PROFILES:
         raise ValueError(f"Unknown expert profile {profile!r}")
+    if profile == "full_7":
+        from model.composite_experts.set_a_residual import SET_A_FEATURE_DIM
+        from model.composite_experts.set_b_residual import SET_B_FEATURE_DIM
+        if (FULL7_FEATURE_DIMS["expert5"] != SET_A_FEATURE_DIM
+                or FULL7_FEATURE_DIMS["expert6"] != SET_B_FEATURE_DIM
+                or FULL7_FEATURE_WIDTH != 29959):
+            raise RuntimeError("Full7 E5/E6 feature contracts differ from the frozen registry")
     order = EXPERT_PROFILES[profile]
-    dimensions = {name: EXPERT_FEATURE_DIMS_FULL9[name] for name in order}
+    source = FULL7_FEATURE_DIMS if profile == "full_7" else EXPERT_FEATURE_DIMS_FULL9
+    dimensions = {name: source[name] for name in order}
     return order, dimensions, sum(dimensions.values())
 
 
@@ -402,6 +419,9 @@ __all__ = [
     "EXPECTED_FEATURE_WIDTH",
     "EXPECTED_FULL9_FEATURE_WIDTH",
     "FULL9_EXPERT_ORDER",
+    "FULL7_EXPERT_ORDER",
+    "FULL7_FEATURE_DIMS",
+    "FULL7_FEATURE_WIDTH",
     "ExpertInputContract",
     "ExpertRegistration",
     "create_expert_adapter",

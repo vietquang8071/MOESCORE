@@ -2,7 +2,8 @@
 
 **Project:** XACLE Challenge 2027 / MOESCORE  
 **Document:** `core-overview.md`  
-**Status:** **Core Design V1 — design frozen; implementation and real-data verification pending**  
+**Status:** **Core Design V1 — design frozen; Core.1–Core.5 implementation synthetically verified; real-data verification pending**
+**Implementation annotation (2026-11-19):** Core.1–Core.5 are implemented and synthetically verified in this worktree; real-data verification, official training, measured validation results, and competition approvals remain pending. See `docs/MOE27-Core-implementation.md` and `MOE27-Core-report.md`.
 **Date:** 2026-11-19  
 **Integration baseline:** `vietquang8071/MOESCORE`, branch `feature/xacle2027-7expert-moe`, reviewed at commit `834222e2fcde378db51fc902270bd9235553ab72`  
 **Intended implementation worktree:** `MOESCORE-Core`, intended feature branch `dev/moe27-core` (remote branch creation/push **not yet verified**).  

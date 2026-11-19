@@ -216,7 +216,10 @@ class MoeGateEvaluator:
         return rows
 
 
-def write_submission_csv(rows: Sequence[Mapping[str, Any]], path: str | os.PathLike[str]) -> Path:
+def write_submission_csv(rows: Sequence[Mapping[str, Any]], path: str | os.PathLike[str],
+                         *, filename_column: str = "wav_file_name") -> Path:
+    if filename_column not in {"wav_file_name", "wave_file_name"}:
+        raise ValueError("unsupported submission filename column")
     if isinstance(rows, (str, bytes)) or not isinstance(rows, Sequence) or not rows:
         raise ValueError("submission rows must be a non-empty sequence")
     output: list[dict[str, Any]] = []
@@ -234,13 +237,13 @@ def write_submission_csv(rows: Sequence[Mapping[str, Any]], path: str | os.PathL
             raise ValueError("submission predictions must be finite numeric values")
         sample_ids.add(sample_id)
         filenames.add(filename)
-        output.append({"wav_file_name": filename, "pred_score": float(score)})
+        output.append({filename_column: filename, "pred_score": float(score)})
     target = Path(path).expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(prefix=target.name + ".", suffix=".tmp", dir=target.parent, text=True)
     try:
         with os.fdopen(descriptor, "w", newline="", encoding="utf-8") as stream:
-            writer = csv.DictWriter(stream, fieldnames=["wav_file_name", "pred_score"], lineterminator="\n")
+            writer = csv.DictWriter(stream, fieldnames=[filename_column, "pred_score"], lineterminator="\n")
             writer.writeheader()
             writer.writerows(output)
         os.replace(temporary_name, target)

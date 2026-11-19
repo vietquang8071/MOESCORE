@@ -22,7 +22,7 @@ TEXT_CACHE_RESOURCES = (
 
 
 def prepare_text_cache(cache_dir, *, allow_download=False, profile="top1_4"):
-    if profile not in {"top1_4", "full_9"}:
+    if profile not in {"top1_4", "full_9", "full_10"}:
         raise ValueError("unknown expert profile")
     home = Path(cache_dir).expanduser().resolve()
     if home.name == "hub":
@@ -36,7 +36,7 @@ def prepare_text_cache(cache_dir, *, allow_download=False, profile="top1_4"):
     from transformers import AutoConfig, AutoTokenizer, BertConfig, BertTokenizer
 
     checked = []
-    resources = TEXT_CACHE_RESOURCES + (("gpt2", True),) if profile == "full_9" else TEXT_CACHE_RESOURCES
+    resources = TEXT_CACHE_RESOURCES + (("gpt2", True),) if profile in {"full_9", "full_10"} else TEXT_CACHE_RESOURCES
     for model_id, needs_weights in resources:
         try:
             if allow_download:
@@ -69,7 +69,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cache-dir", required=True)
     parser.add_argument("--download", action="store_true")
-    parser.add_argument("--profile", choices=("top1_4", "full_9"), default="top1_4")
+    parser.add_argument("--profile", choices=("top1_4", "full_9", "full_10"), default="top1_4")
     parser.add_argument("--report-json")
     args = parser.parse_args(argv)
     report = prepare_text_cache(args.cache_dir, allow_download=args.download, profile=args.profile)

@@ -15,19 +15,30 @@ from data.moe_feature_store import _atomic_json, validate_feature_store
 from model.expert_adapters.registry import profile_contract
 
 
-def validate_full9_store(store_root, expected_counts=None):
+def validate_profile_store(store_root, *, profile, expected_counts=None):
+    if profile not in {"full_9", "full_10"}:
+        raise ValueError("Kaggle feature-cache packaging supports full_9 and full_10 stores")
     result = {}
-    expected_width = profile_contract("full_9")[2]
+    expected_order, _, expected_width = profile_contract(profile)
     for split in ("train", "validation", "test"):
         manifest = validate_feature_store(store_root, split=split, require_labels=split != "test")
         count = sum(shard["count"] for shard in manifest["shards"])
-        if (manifest.get("expert_profile") != "full_9" or len(manifest["expert_order"]) != 9
+        if (manifest.get("expert_profile") != profile or tuple(manifest["expert_order"]) != expected_order
                 or manifest["feature_width"] != expected_width or (split == "test" and manifest["labels_present"])):
-            raise ValueError(f"{split}: incompatible full_9 feature store")
+            raise ValueError(f"{split}: incompatible {profile} feature store")
         if expected_counts and count != expected_counts[split]:
             raise ValueError(f"{split}: expected {expected_counts[split]} samples, found {count}")
         result[split] = {"samples": count, "store_identity": manifest["store_identity_sha256"]}
     return result
+
+
+def validate_full9_store(store_root, expected_counts=None):
+    """Backward-compatible Full9 validator used by the existing notebook."""
+    return validate_profile_store(store_root, profile="full_9", expected_counts=expected_counts)
+
+
+def validate_full10_store(store_root, expected_counts=None):
+    return validate_profile_store(store_root, profile="full_10", expected_counts=expected_counts)
 
 
 def package_feature_cache(output_root, upload_directory, *, stores=None):

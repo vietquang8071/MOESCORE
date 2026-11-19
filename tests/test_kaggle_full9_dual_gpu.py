@@ -45,6 +45,24 @@ class DualGpuTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             dual.validate_worker_devices({**mapping, "extra": "cuda:0"}, order, require_two=True)
 
+    def test_full10_dual_gpu_resumes_a_valid_profile_store_without_worker_launch(self):
+        order = extraction.EXPERT_PROFILES["full_10"]
+        mapping = dual.default_worker_devices(order)
+        job = {
+            "expert_profile": "full_10", "expert_order": list(order),
+            "assembly_ids": {"train": "1" * 64, "validation": "2" * 64, "test": "3" * 64},
+        }
+        with patch.object(dual, "require_kaggle_dual_gpu", return_value={"cuda:0": "GPU0", "cuda:1": "GPU1"}), \
+             patch.object(dual, "prepare_job", return_value=({}, job, {})) as prepare, \
+             patch.object(dual, "completed_stores_match", return_value=True):
+            report = dual.extract_dual_gpu(
+                "config.yaml", "dataset", "output", profile="full_10", worker_devices=mapping
+            )
+        self.assertEqual(prepare.call_args.kwargs["profile"], "full_10")
+        self.assertEqual(prepare.call_args.kwargs["worker_devices"], mapping)
+        self.assertTrue(report["reused_complete_store"])
+        self.assertEqual(report["worker_devices"], mapping)
+
     def test_scheduler_runs_one_expert_per_gpu_and_stops_after_failure(self):
         order = ("a", "b", "c", "d")
         mapping = {"a": "cuda:0", "b": "cuda:1", "c": "cuda:0", "d": "cuda:1"}
@@ -213,6 +231,20 @@ class DualGpuTests(unittest.TestCase):
         self.assertTrue(any("package_feature_cache" in cell for cell in code))
         self.assertTrue(any("upload_feature_cache" in cell for cell in code))
         self.assertNotIn("/home/vitquay1708", "\n".join(code))
+        for cell in code:
+            compile(cell, str(notebook), "exec")
+
+    def test_full10_notebook_uses_shared_profile_aware_scripts(self):
+        notebook = Path(__file__).resolve().parents[1] / "notebooks/MOESCORE_Full10_Kaggle.ipynb"
+        document = json.loads(notebook.read_text())
+        code = ["".join(cell["source"]) for cell in document["cells"] if cell["cell_type"] == "code"]
+        source = "\n".join(code)
+        self.assertIn('EXPERT_PROFILE = "full_10"', source)
+        self.assertIn('EXPERT_PROFILES["full_10"]', source)
+        self.assertIn("m2d_lora_coral", source)
+        self.assertIn("FULL10_CHECKPOINT_FIELDS", source)
+        self.assertIn("kaggle_full9_dual_gpu.py", source)
+        self.assertNotIn("/home/vitquay1708", source)
         for cell in code:
             compile(cell, str(notebook), "exec")
 

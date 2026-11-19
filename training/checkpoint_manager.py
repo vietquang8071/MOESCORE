@@ -18,17 +18,18 @@ from model.moe_gating_core import GatingNetwork
 
 CHECKPOINT_FORMAT_VERSION = 1
 FULL9_CHECKPOINT_FORMAT_VERSION = 2
+PROFILE_CHECKPOINT_FORMAT_VERSION = FULL9_CHECKPOINT_FORMAT_VERSION
 
 
 def _validate_gate_payload(payload: Mapping[str, Any], gate: GatingNetwork) -> None:
     version = payload.get("format_version")
-    if version not in {CHECKPOINT_FORMAT_VERSION, FULL9_CHECKPOINT_FORMAT_VERSION}:
+    if version not in {CHECKPOINT_FORMAT_VERSION, PROFILE_CHECKPOINT_FORMAT_VERSION}:
         raise ValueError("unsupported gating checkpoint schema")
     profile = "top1_4" if version == CHECKPOINT_FORMAT_VERSION else payload.get("expert_profile")
     order, dimensions, width = profile_contract(profile)
     if profile != gate.profile or payload.get("gate_input_dim") != width or payload.get("gate_expert_count") != len(order):
         raise ValueError("checkpoint expert profile, feature width, or expert count is incompatible")
-    if version == FULL9_CHECKPOINT_FORMAT_VERSION and (
+    if version == PROFILE_CHECKPOINT_FORMAT_VERSION and (
         payload.get("expert_order") != list(order)
         or payload.get("expert_feature_dimensions") != dimensions
         or not isinstance(payload.get("expert_checkpoint_provenance"), Mapping)
@@ -36,7 +37,22 @@ def _validate_gate_payload(payload: Mapping[str, Any], gate: GatingNetwork) -> N
         or not isinstance(payload.get("feature_store_identity"), Mapping)
         or not all(payload["feature_store_identity"].get(key) for key in ("train", "validation", "preprocessing_contract"))
     ):
-        raise ValueError("checkpoint full_9 order, dimensions, or provenance are incompatible")
+        raise ValueError(f"checkpoint {profile} order, dimensions, or provenance are incompatible")
+    if profile == "full_10":
+        rng_state = payload.get("torch_rng_state")
+        cuda_rng_states = payload.get("cuda_rng_states")
+        resume_state_valid = (
+            type(payload.get("epoch")) is int and payload["epoch"] >= 0
+            and type(payload.get("global_step")) is int and payload["global_step"] >= 0
+            and isinstance(payload.get("optimizer_state_dict"), Mapping)
+            and isinstance(payload.get("scheduler_state_dict"), Mapping)
+            and isinstance(rng_state, torch.Tensor) and rng_state.dtype == torch.uint8 and rng_state.ndim == 1
+            and isinstance(cuda_rng_states, list)
+            and all(isinstance(state, torch.Tensor) and state.dtype == torch.uint8 and state.ndim == 1
+                    for state in cuda_rng_states)
+        )
+        if not resume_state_valid:
+            raise ValueError("full_10 checkpoint resume state is missing or invalid")
 
 
 def _canonical(value: Any, field: str) -> bytes:
@@ -111,18 +127,20 @@ class MoeCheckpointManager:
         provenance_body = json.loads(_canonical(dict(expert_checkpoint_provenance), "expert_checkpoint_provenance").decode("utf-8"))
         if not identity_body or not provenance_body:
             raise ValueError("feature-store identity and expert checkpoint provenance are required")
-        if gating_network.profile == "full_9" and (
+        if gating_network.profile in {"full_9", "full_10"} and (
             set(provenance_body) != set(order)
             or not all(identity_body.get(key) for key in ("train", "validation", "preprocessing_contract"))
         ):
-            raise ValueError("full_9 checkpoint requires complete expert and store provenance")
+            raise ValueError(f"{gating_network.profile} checkpoint requires complete expert and store provenance")
+        if gating_network.profile == "full_10" and scheduler is None:
+            raise ValueError("full_10 checkpoint requires scheduler state for resumability")
         if sampler_state is not None:
             sampler_body = json.loads(_canonical(dict(sampler_state), "sampler_state").decode("utf-8"))
         else:
             sampler_body = None
         gate_state = {key: value.detach().cpu().clone() for key, value in gating_network.state_dict().items()}
         payload = {
-            "format_version": (CHECKPOINT_FORMAT_VERSION if gating_network.profile == "top1_4" else FULL9_CHECKPOINT_FORMAT_VERSION),
+            "format_version": (CHECKPOINT_FORMAT_VERSION if gating_network.profile == "top1_4" else PROFILE_CHECKPOINT_FORMAT_VERSION),
             "gate_input_dim": gating_network.input_feature_dim,
             "gate_expert_count": gating_network.num_experts,
             "gating_state_dict": gate_state,
@@ -144,7 +162,7 @@ class MoeCheckpointManager:
             "cuda_rng_states": [state.cpu().clone() for state in torch.cuda.get_rng_state_all()]
             if torch.cuda.is_available() and torch.cuda.is_initialized() else [],
         }
-        if gating_network.profile == "full_9":
+        if gating_network.profile in {"full_9", "full_10"}:
             payload.update({
                 "expert_profile": gating_network.profile,
                 "expert_order": list(order),
@@ -258,4 +276,9 @@ class MoeCheckpointManager:
         return payload
 
 
-__all__ = ["CHECKPOINT_FORMAT_VERSION", "MoeCheckpointManager"]
+__all__ = [
+    "CHECKPOINT_FORMAT_VERSION",
+    "FULL9_CHECKPOINT_FORMAT_VERSION",
+    "PROFILE_CHECKPOINT_FORMAT_VERSION",
+    "MoeCheckpointManager",
+]

@@ -43,7 +43,8 @@ from data.moe_expert_cache import (
 )
 from model.expert_adapters.registry import (
     EXPERT_ORDER, EXPERT_FEATURE_DIMS, EXPERT_INPUT_CONTRACTS,
-    EXPERT_FEATURE_DIMS_FULL9, TOP2_EXPERT_INPUT_CONTRACTS, create_expert_adapter,
+    EXPERT_FEATURE_DIMS_FULL9, EXPERT_FEATURE_DIMS_FULL10,
+    TOP2_EXPERT_INPUT_CONTRACTS, create_expert_adapter,
     validate_and_assemble_expert_outputs,
     EXPERT_PROFILES, profile_contract,
     ALL_EXPERT_INPUT_CONTRACTS,
@@ -77,6 +78,10 @@ FULL9_CHECKPOINT_FIELDS = {**CHECKPOINT_FIELDS,
     "top2_laion": ("checkpoint",),
     "top2_mga": ("pretrained_checkpoint",),
     "m2d_lora": ("base_checkpoint", "finetuned_checkpoint"),
+}
+FULL10_CHECKPOINT_FIELDS = {
+    **FULL9_CHECKPOINT_FIELDS,
+    "m2d_lora_coral": ("base_checkpoint", "finetuned_checkpoint"),
 }
 
 
@@ -117,6 +122,7 @@ _ADAPTER_SOURCE_FILES = {
     "top2_laion": "model/expert_adapters/top2_laion_adapter.py",
     "top2_mga": "model/expert_adapters/top2_mga_adapter.py",
     "m2d_lora": "model/expert_adapters/m2d_lora_adapter.py",
+    "m2d_lora_coral": "model/expert_adapters/m2d_lora_coral_adapter.py",
 }
 _PREPROCESS_METHODS = {
     "expert1": "_expert1_audio",
@@ -128,6 +134,7 @@ _PREPROCESS_METHODS = {
     "top2_laion": "_expert1_audio",
     "top2_mga": "_expert2_audio",
     "m2d_lora": "_expert3_audio",
+    "m2d_lora_coral": "_expert3_audio",
 }
 _TEXT_RESOURCE_IDS = {
     "expert1": ("roberta-base",),
@@ -140,6 +147,7 @@ _TEXT_RESOURCE_IDS = {
     "top2_mga": ("bert-base-uncased",),
     # PortableM2D's BertXEncoder defaults to this exact Hub ID.
     "m2d_lora": ("google-bert/bert-base-uncased",),
+    "m2d_lora_coral": ("google-bert/bert-base-uncased",),
 }
 _DEPENDENCIES = {
     "expert1": ("torch", "numpy", "laion-clap", "transformers", "torchaudio", "torchlibrosa"),
@@ -151,6 +159,7 @@ _DEPENDENCIES = {
     "top2_laion": ("torch", "numpy", "transformers", "laion-clap", "torchaudio"),
     "top2_mga": ("torch", "numpy", "scipy", "transformers", "timm", "sentence-transformers", "PyYAML"),
     "m2d_lora": ("torch", "numpy", "scipy", "soundfile", "torchaudio", "transformers", "timm", "einops", "nnAudio"),
+    "m2d_lora_coral": ("torch", "numpy", "scipy", "soundfile", "torchaudio", "transformers", "timm", "einops", "nnAudio"),
 }
 
 
@@ -226,7 +235,7 @@ def compute_expert_cache_identity(expert, config, *, contract=None, feature_dim=
     if contract is None:
         raise ValueError(f"No effective input contract is defined for {expert!r}")
     if feature_dim is None:
-        feature_dim = EXPERT_FEATURE_DIMS_FULL9.get(expert)
+        feature_dim = EXPERT_FEATURE_DIMS_FULL10.get(expert)
     if type(feature_dim) is not int or feature_dim <= 0:
         raise ValueError(f"A verified feature_dim is required to identify {expert!r}")
     selected_device = str(device if device is not None else config.get("runtime", {}).get("device", "auto"))
@@ -249,7 +258,7 @@ def compute_expert_cache_identity(expert, config, *, contract=None, feature_dim=
             "cudnn_version": torch.backends.cudnn.version(),
         })
 
-    checkpoint_fields = CHECKPOINT_FIELDS.get(expert)
+    checkpoint_fields = FULL10_CHECKPOINT_FIELDS.get(expert)
     if checkpoint_fields is None:
         checkpoint_fields = tuple(
             key for key in section if "checkpoint" in key.lower() and section[key] is not None
@@ -270,7 +279,7 @@ def compute_expert_cache_identity(expert, config, *, contract=None, feature_dim=
             PROJECT_ROOT / "model/expert_adapters/paired_cross_features.py"
         )
     extra_implementation = {}
-    if expert.startswith("top2_") or expert == "m2d_lora":
+    if expert.startswith("top2_") or expert in {"m2d_lora", "m2d_lora_coral"}:
         implementation_files.add(PROJECT_ROOT / "model/expert_adapters/top2_common.py")
     # The selected dataset method, serialized input contract and WAV resolver
     # cover effective dispatch without hashing unrelated expert branches.
@@ -298,7 +307,7 @@ def compute_expert_cache_identity(expert, config, *, contract=None, feature_dim=
         implementation_files.update(
             _source_files_under(PROJECT_ROOT / "expert3_finetune/XACLE_2027_baselinemodel")
         )
-    if expert in {"top2_m2d", "m2d_lora"}:
+    if expert in {"top2_m2d", "m2d_lora", "m2d_lora_coral"}:
         implementation_files.update(
             _source_files_under(PROJECT_ROOT / "expert3_finetune/XACLE_2027_baselinemodel")
         )
@@ -306,6 +315,11 @@ def compute_expert_cache_identity(expert, config, *, contract=None, feature_dim=
         implementation_files.add(
             PROJECT_ROOT / "model/expert_adapters/m2d_lora_runtime.py"
         )
+    if expert == "m2d_lora_coral":
+        implementation_files.update({
+            PROJECT_ROOT / "model/expert_adapters/m2d_lora_runtime.py",
+            PROJECT_ROOT / "model/expert_adapters/m2d_lora_coral_runtime.py",
+        })
     if expert == "top2_mga" and not section.get("source_dir"):
         implementation_files.update(
             _source_files_under(PROJECT_ROOT / "expert2_finetune/MGA-CLAP")
@@ -413,7 +427,7 @@ def checkpoint_provenance(config, profile="top1_4"):
     result = {}
     for expert in profile_contract(profile)[0]:
         result[expert] = {}
-        for field in FULL9_CHECKPOINT_FIELDS[expert]:
+        for field in FULL10_CHECKPOINT_FIELDS[expert]:
             path = Path(config["experts"][expert][field])
             if not path.is_file():
                 raise FileNotFoundError(f"Missing approved checkpoint: {path}")
@@ -631,7 +645,7 @@ def load_chunk(path, *, expert, records, identity, sample_identity=None):
         path,
         expert_identity=identity,
         sample_identity=sample_identity,
-        feature_dim=EXPERT_FEATURE_DIMS_FULL9[expert],
+        feature_dim=EXPERT_FEATURE_DIMS_FULL10[expert],
     )
 
 
@@ -835,8 +849,8 @@ def assemble_stores(job, manifests, output_root):
         writer = MoeFeatureStoreWriter(final_root, split=split,
             expected_sample_ids=[r["sample_id"] for r in records], source_manifest_sha256=manifest["sha256"],
             checkpoint_provenance=job["checkpoint_provenance"], preprocessing_identity=split_preprocessing_identity,
-            profile=job["expert_profile"], per_expert_cache_identities=job["expert_cache_identities"] if job["expert_profile"] == "full_9" else None,
-            assembly_identity=assembly if job["expert_profile"] == "full_9" else None)
+            profile=job["expert_profile"], per_expert_cache_identities=job["expert_cache_identities"] if job["expert_profile"] in {"full_9", "full_10"} else None,
+            assembly_identity=assembly if job["expert_profile"] in {"full_9", "full_10"} else None)
         for index, start in enumerate(range(0, len(records), job["shard_size"])):
             selected = records[start:start + job["shard_size"]]
             outputs = {}
@@ -913,7 +927,7 @@ def main(argv=None):
     parser.add_argument("--batch-sizes", default=None)
     parser.add_argument("--shard-size", type=int, default=128)
     parser.add_argument("--smoke", action="store_true")
-    parser.add_argument("--worker", choices=tuple(EXPERT_FEATURE_DIMS_FULL9))
+    parser.add_argument("--worker", choices=tuple(EXPERT_FEATURE_DIMS_FULL10))
     parser.add_argument("--assembly-id", help="Schema-v2 assembly job identity used by worker subprocesses")
     args = parser.parse_args(argv)
     root = Path(args.output_root)

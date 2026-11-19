@@ -22,6 +22,7 @@ class PairedCrossCacheIdentityTests(unittest.TestCase):
         "expert3": 3840,
         "expert4": 1024,
         "m2d_lora": 3073,
+        "m2d_lora_coral": 3073,
     }
     LEGACY_PAIRED_DIMENSIONS = {
         "expert1": 2560,
@@ -31,7 +32,7 @@ class PairedCrossCacheIdentityTests(unittest.TestCase):
         "top2_laion": 2560,
         "top2_mga": 5120,
     }
-    UNCHANGED = ("expert3", "expert4", "m2d_lora")
+    UNCHANGED = ("expert3", "expert4", "m2d_lora", "m2d_lora_coral")
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -55,12 +56,17 @@ class PairedCrossCacheIdentityTests(unittest.TestCase):
         self._write_source("model/expert_adapters/base.py")
         for expert, relative_path in extraction._ADAPTER_SOURCE_FILES.items():
             self._write_source(relative_path)
-            if expert.startswith("top2_") or expert == "m2d_lora":
+            if expert.startswith("top2_") or expert in {"m2d_lora", "m2d_lora_coral"}:
                 self._write_source("model/expert_adapters/top2_common.py")
             if expert == "m2d_lora":
                 self.runtime_source = self._write_source(
                     "model/expert_adapters/m2d_lora_runtime.py"
                 )
+            if expert == "m2d_lora_coral":
+                self.coral_runtime_source = self._write_source(
+                    "model/expert_adapters/m2d_lora_coral_runtime.py"
+                )
+                self._write_source("model/expert_adapters/m2d_lora_runtime.py")
             if expert == "expert2":
                 self._write_source("expert2_finetune/expert2_model.py")
             if expert == "expert4":
@@ -76,7 +82,9 @@ class PairedCrossCacheIdentityTests(unittest.TestCase):
     def _create_checkpoints(self):
         self.config = {"runtime": {"device": "cpu", "cache_dir": str(self.cache_root)}, "experts": {}}
         for expert in self.DIMENSIONS:
-            fields = extraction.CHECKPOINT_FIELDS.get(expert, ("checkpoint",))
+            fields = extraction.FULL10_CHECKPOINT_FIELDS.get(
+                expert, extraction.CHECKPOINT_FIELDS.get(expert, ("checkpoint",))
+            )
             section = {}
             for field in fields:
                 path = self.root / "weights" / f"{expert}-{field}.pth"
@@ -101,7 +109,7 @@ class PairedCrossCacheIdentityTests(unittest.TestCase):
             refs.mkdir(parents=True, exist_ok=True)
             (refs / "main").write_text("fixture-revision", encoding="utf-8")
 
-    def _identity(self, expert: str, *, feature_dim: int | None = None):
+    def _identity(self, expert: str, *, feature_dim: int | None = None, config=None):
         contract = extraction.EXPERT_INPUT_CONTRACTS.get(expert)
         if contract is None:
             contract = extraction.TOP2_EXPERT_INPUT_CONTRACTS.get(expert)
@@ -125,7 +133,7 @@ class PairedCrossCacheIdentityTests(unittest.TestCase):
         ):
             return extraction.compute_expert_cache_identity(
                 expert,
-                self.config,
+                self.config if config is None else config,
                 contract=contract,
                 feature_dim=feature_dim or self.DIMENSIONS[expert],
                 device="cpu",
@@ -167,6 +175,26 @@ class PairedCrossCacheIdentityTests(unittest.TestCase):
             ]["model_id"],
             "google-bert/bert-base-uncased",
         )
+
+    def test_e10_identity_uses_its_own_runtime_and_profile_addition_preserves_old_ids(self):
+        full10 = self.config
+        full9 = {
+            "runtime": full10["runtime"],
+            "experts": {name: value for name, value in full10["experts"].items()
+                        if name != "m2d_lora_coral"},
+        }
+        for expert in (name for name in self.DIMENSIONS if name != "m2d_lora_coral"):
+            self.assertEqual(
+                self._identity(expert, config=full9)["cache_id"],
+                self._identity(expert, config=full10)["cache_id"],
+                expert,
+            )
+        before = self._identity("m2d_lora_coral")
+        self.coral_runtime_source.write_text("fixture E10 runtime v2\n", encoding="utf-8")
+        after = self._identity("m2d_lora_coral")
+        self.assertNotEqual(before["cache_id"], after["cache_id"])
+        self.assertEqual(after["preprocessing_provenance"]["dataset_method"], "_expert3_audio")
+        self.assertEqual(after["input_contract"]["sample_rate_hz"], 16000)
 
     def test_unchanged_expert_identities_do_not_depend_on_new_helper_policy(self):
         for expert in self.UNCHANGED:

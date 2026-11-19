@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare one full_9 job, run one expert at a time on each of two GPUs, assemble.
+"""Prepare a profile job, run one expert at a time on each of two GPUs, assemble.
 
 This module never imports an expert model. Each model lives in its own worker
 subprocess; the shared parent hashes resources and writes manifests once.
@@ -39,7 +39,7 @@ def dependency_plan_for_python(version):
         return PROJECT_ROOT / "requirements-kaggle-py312.txt", False
     if selected == (3, 13):
         return PROJECT_ROOT / "requirements-kaggle-py313.txt", True
-    raise RuntimeError(f"Kaggle full_9 requires Python 3.12 or 3.13; active {selected}")
+    raise RuntimeError(f"Kaggle dual-GPU extraction requires Python 3.12 or 3.13; active {selected}")
 
 
 def validate_worker_devices(mapping, order, *, require_two=True):
@@ -56,7 +56,7 @@ def require_kaggle_dual_gpu():
     import torch
     dependency_plan_for_python(sys.version_info)
     if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
-        raise RuntimeError("Kaggle full_9 dual-GPU mode requires two visible CUDA devices")
+        raise RuntimeError("Kaggle dual-GPU mode requires two visible CUDA devices")
     return {f"cuda:{index}": torch.cuda.get_device_name(index) for index in (0, 1)}
 
 
@@ -103,9 +103,12 @@ def run_assigned_workers(order, mapping, runner):
 
 
 def extract_dual_gpu(config_path, dataset_root, output_root, *, worker_devices=None,
-                     batch_sizes=None, shard_size=128, smoke=False, require_runtime=True):
+                     batch_sizes=None, shard_size=128, smoke=False, require_runtime=True,
+                     profile="full_9"):
     import torch
-    order = EXPERT_PROFILES["full_9"]
+    if profile not in {"full_9", "full_10"}:
+        raise ValueError("dual-GPU extraction supports the full_9 and full_10 profiles")
+    order = EXPERT_PROFILES[profile]
     mapping = validate_worker_devices(worker_devices or default_worker_devices(order), order)
     gpu_names = require_kaggle_dual_gpu() if require_runtime else {
         f"cuda:{i}": torch.cuda.get_device_name(i) for i in range(2)
@@ -113,7 +116,7 @@ def extract_dual_gpu(config_path, dataset_root, output_root, *, worker_devices=N
     output_root = Path(output_root).resolve()
     config, job, manifests = prepare_job(
         config_path, dataset_root, output_root, batch_sizes=batch_sizes, shard_size=shard_size,
-        limit=4 if smoke else None, device="cuda:0", profile="full_9", worker_devices=mapping,
+        limit=4 if smoke else None, device="cuda:0", profile=profile, worker_devices=mapping,
     )
     job_id = job_identity(job)
     final_root = assembly_store_root(output_root, job)
@@ -128,7 +131,7 @@ def extract_dual_gpu(config_path, dataset_root, output_root, *, worker_devices=N
         start = datetime.now(timezone.utc).isoformat()
         command = [sys.executable, str(script), "--config", str(config_path),
                    "--dataset-root", str(dataset_root), "--output-root", str(output_root),
-                   "--device", device, "--profile", "full_9", "--worker", expert,
+                   "--device", device, "--profile", profile, "--worker", expert,
                    "--assembly-id", job_id]
         log = log_root / f"{expert}.log"
         with log.open("w", encoding="utf-8") as stream:
@@ -160,9 +163,9 @@ def extract_dual_gpu(config_path, dataset_root, output_root, *, worker_devices=N
         assemble_stores(job, manifests, output_root)
         splits = {split: validate_feature_store(final_root, split=split, require_labels=split != "test")
                   for split in ("train", "validation", "test")}
-        expected_width = profile_contract("full_9")[2]
-        if any(value["feature_width"] != expected_width or len(value["expert_order"]) != 9 for value in splits.values()):
-            raise ValueError("Assembled full_9 store has an invalid feature or score contract")
+        expected_width = profile_contract(profile)[2]
+        if any(value["feature_width"] != expected_width or len(value["expert_order"]) != len(order) for value in splits.values()):
+            raise ValueError(f"Assembled {profile} store has an invalid feature or score contract")
     except BaseException as exc:
         _atomic_json(log_root / "stage.json", {"status": "FAIL", "error": f"{type(exc).__name__}: {exc}"})
         raise
@@ -181,19 +184,20 @@ def main(argv=None):
     parser.add_argument("--dataset-root", required=True)
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--worker-devices-json")
-    parser.add_argument("--batch-sizes", help="Nine comma-separated positive integers in profile order")
+    parser.add_argument("--profile", choices=("full_9", "full_10"), default="full_9")
+    parser.add_argument("--batch-sizes", help="One positive integer per expert in profile order")
     parser.add_argument("--shard-size", type=int, default=128)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--report-json")
     args = parser.parse_args(argv)
-    order = EXPERT_PROFILES["full_9"]
+    order = EXPERT_PROFILES[args.profile]
     sizes = None if args.batch_sizes is None else [int(x) for x in args.batch_sizes.split(",")]
     if sizes is not None and (len(sizes) != len(order) or any(n <= 0 for n in sizes)):
-        parser.error("--batch-sizes requires nine positive values")
+        parser.error(f"--batch-sizes requires {len(order)} positive values for {args.profile}")
     mapping = json.loads(Path(args.worker_devices_json).read_text()) if args.worker_devices_json else None
     report = extract_dual_gpu(args.config, args.dataset_root, args.output_root,
         worker_devices=mapping, batch_sizes=dict(zip(order, sizes)) if sizes else None,
-        shard_size=args.shard_size, smoke=args.smoke)
+        shard_size=args.shard_size, smoke=args.smoke, profile=args.profile)
     if args.report_json:
         _atomic_json(Path(args.report_json), report)
     print(json.dumps(report, indent=2))

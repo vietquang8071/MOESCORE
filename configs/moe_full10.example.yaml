@@ -1,0 +1,70 @@
+schema_version: 1
+expert_profile: full_10
+paths:
+  project_root: ..
+  data_root: ../data
+  resource_root: ..
+runtime:
+  device: auto
+  offline: true
+  cache_dir: .cache/huggingface
+data:
+  train_csv: metadata/train.csv
+  validation_csv: metadata/validation.csv
+  test_csv: metadata/test.csv
+  audio_root: audio
+experts:
+  expert1:
+    pretrained_checkpoint: weights/pretrained/laion-clap.pt
+    finetuned_checkpoint: weights/finetuned_weights/expert1_best.pt
+    enable_fusion: false
+  expert2:
+    source_dir: expert2_finetune/MGA-CLAP
+    architecture_yaml: expert2_finetune/MGA-CLAP/settings/inference_example.yaml
+    training_config: expert2_finetune/expert2_finetune.yaml
+    pretrained_checkpoint: weights/pretrained/mga-clap.pt
+    finetuned_checkpoint: weights/finetuned_weights/expert2_best.pt
+    freeze_policy: partial
+  expert3:
+    source_dir: expert3_finetune/XACLE_2027_baselinemodel
+    base_checkpoint: weights/pretrained/checkpoint-30.pth
+    expected_base_sha256: 238521603c04862ab151cdd80980b591cb36ebe844d43203992fac9ef085c8a1
+    finetuned_checkpoint: weights/finetuned_weights/expert3_best.pt
+    concat_assignment: released
+    model_config: expert3_finetune/XACLE_2027_baselinemodel/configs/expert3_moescore.json
+  expert4:
+    beats_checkpoint: weights/pretrained/BEATs_iter3_plus_AS2M.pt
+    clap_checkpoint: weights/pretrained/laion-clap.pt
+    unilm_source_dir: /path/to/verified/unilm_expert4_original
+    finetuned_checkpoint: weights/finetuned_weights/expert4_best.pt
+  top2_m2d:
+    checkpoint: weights/pretrained/checkpoint-30.pth
+  top2_msclap:
+    checkpoint: weights/pretrained/CLAP_weights_2023.pth
+  top2_laion:
+    checkpoint: weights/pretrained/laion-clap.pt
+  top2_mga:
+    source_dir: expert2_finetune/MGA-CLAP
+    architecture_yaml: expert2_finetune/MGA-CLAP/settings/inference_example.yaml
+    pretrained_checkpoint: weights/pretrained/mga-clap.pt
+  m2d_lora:
+    base_checkpoint: weights/pretrained/checkpoint-30.pth
+    finetuned_checkpoint: weights/best.pt
+  m2d_lora_coral:
+    base_checkpoint: weights/pretrained/checkpoint-30.pth
+    # Copy the private E31 artifact here, or replace with an absolute local path.
+    finetuned_checkpoint: weights/m2d-lora-Nam.pt
+gate:
+  expert_order:
+    - expert1
+    - expert2
+    - expert3
+    - expert4
+    - top2_m2d
+    - top2_msclap
+    - top2_laion
+    - top2_mga
+    - m2d_lora
+    - m2d_lora_coral
+  hidden_dim: 512
+  dropout: 0.1

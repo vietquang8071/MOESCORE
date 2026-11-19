@@ -22,6 +22,7 @@ from model.expert_adapters.registry import EXPERT_PROFILES
 PathValue = Union[str, os.PathLike]
 EXPERT_ORDER = EXPERT_PROFILES["top1_4"]
 FULL9_EXPERT_ORDER = EXPERT_PROFILES["full_9"]
+FULL10_EXPERT_ORDER = EXPERT_PROFILES["full_10"]
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _DEVICE_RE = re.compile(r"^cuda:\d+$")
 
@@ -90,9 +91,9 @@ def validate_moe_config(config: Any) -> None:
     if type(version) is not int or version != 1:
         raise MoeConfigError(f"schema_version must be the supported integer 1; got {version!r}")
     profile = config.get("expert_profile", "top1_4")
-    if profile not in {"top1_4", "full_9"}:
-        raise MoeConfigError("expert_profile must be 'top1_4' or 'full_9'")
-    expected_order = EXPERT_ORDER if profile == "top1_4" else FULL9_EXPERT_ORDER
+    if profile not in {"top1_4", "full_9", "full_10"}:
+        raise MoeConfigError("expert_profile must be 'top1_4', 'full_9', or 'full_10'")
+    expected_order = EXPERT_PROFILES[profile]
 
     runtime = _mapping(config["runtime"], "runtime")
     _check_keys(
@@ -204,7 +205,7 @@ def validate_moe_config(config: Any) -> None:
         path_fields=e4_fields,
         allowed=e4_fields,
     )
-    if profile == "full_9":
+    if profile in {"full_9", "full_10"}:
         specs = {
             "top2_m2d": ({"checkpoint"}, {"checkpoint"}),
             "top2_msclap": ({"checkpoint"}, {"checkpoint", "audio_roots"}),
@@ -212,6 +213,11 @@ def validate_moe_config(config: Any) -> None:
             "top2_mga": ({"pretrained_checkpoint"}, {"pretrained_checkpoint", "source_dir", "architecture_yaml"}),
             "m2d_lora": ({"base_checkpoint", "finetuned_checkpoint"}, {"base_checkpoint", "finetuned_checkpoint"}),
         }
+        if profile == "full_10":
+            specs["m2d_lora_coral"] = (
+                {"base_checkpoint", "finetuned_checkpoint"},
+                {"base_checkpoint", "finetuned_checkpoint"},
+            )
         for name, (required, allowed) in specs.items():
             section = _mapping(experts[name], f"experts.{name}")
             _validate_expert_paths(section, section=f"experts.{name}", required_fields=required,
@@ -375,6 +381,7 @@ def resolve_moe_paths(
         "top2_laion": ("checkpoint",),
         "top2_mga": ("source_dir", "architecture_yaml", "pretrained_checkpoint"),
         "m2d_lora": ("base_checkpoint", "finetuned_checkpoint"),
+        "m2d_lora_coral": ("base_checkpoint", "finetuned_checkpoint"),
     }
     for expert_name, fields in expert_path_fields.items():
         if expert_name not in output["experts"]:
@@ -426,13 +433,21 @@ def validate_moe_resources(config: Mapping) -> None:
     """
     failures = []
     resources = list(_FILE_RESOURCES + _DIRECTORY_RESOURCES)
-    if config.get("expert_profile", "top1_4") == "full_9":
-        resources.extend((f"experts.{name}.{key}", ("experts", name, key), "checkpoint file" if key not in {"source_dir"} else "source directory")
-                         for name, keys in {
-                             "top2_m2d": ("checkpoint",), "top2_msclap": ("checkpoint",),
-                             "top2_laion": ("checkpoint",), "top2_mga": ("source_dir", "architecture_yaml", "pretrained_checkpoint"),
-                             "m2d_lora": ("base_checkpoint", "finetuned_checkpoint"),
-                         }.items() for key in keys)
+    profile = config.get("expert_profile", "top1_4")
+    if profile in {"full_9", "full_10"}:
+        expert_resources = {
+            "top2_m2d": ("checkpoint",), "top2_msclap": ("checkpoint",),
+            "top2_laion": ("checkpoint",),
+            "top2_mga": ("source_dir", "architecture_yaml", "pretrained_checkpoint"),
+            "m2d_lora": ("base_checkpoint", "finetuned_checkpoint"),
+        }
+        if profile == "full_10":
+            expert_resources["m2d_lora_coral"] = ("base_checkpoint", "finetuned_checkpoint")
+        resources.extend(
+            (f"experts.{name}.{key}", ("experts", name, key),
+             "checkpoint file" if key not in {"source_dir"} else "source directory")
+            for name, keys in expert_resources.items() for key in keys
+        )
     for field, keys, description in resources:
         try:
             value = _get_nested(config, keys)
@@ -477,6 +492,8 @@ def validate_moe_resources(config: Mapping) -> None:
 
 __all__ = [
     "EXPERT_ORDER",
+    "FULL9_EXPERT_ORDER",
+    "FULL10_EXPERT_ORDER",
     "MoeConfigError",
     "load_moe_config",
     "resolve_moe_paths",

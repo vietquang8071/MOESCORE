@@ -54,14 +54,24 @@ EXPERT_FEATURE_DIMS_FULL9 = MappingProxyType(
     }
 )
 EXPECTED_FULL9_FEATURE_WIDTH = sum(EXPERT_FEATURE_DIMS_FULL9.values())
-EXPERT_PROFILES = MappingProxyType({"top1_4": EXPERT_ORDER, "full_9": FULL9_EXPERT_ORDER})
+FULL10_EXPERT_ORDER = (*FULL9_EXPERT_ORDER, "m2d_lora_coral")
+EXPERT_FEATURE_DIMS_FULL10 = MappingProxyType(
+    {**EXPERT_FEATURE_DIMS_FULL9, "m2d_lora_coral": 3073}
+)
+EXPECTED_FULL10_FEATURE_WIDTH = sum(EXPERT_FEATURE_DIMS_FULL10.values())
+EXPERT_PROFILES = MappingProxyType(
+    {"top1_4": EXPERT_ORDER, "full_9": FULL9_EXPERT_ORDER, "full_10": FULL10_EXPERT_ORDER}
+)
 
 
 def profile_contract(profile: str = "top1_4") -> tuple[tuple[str, ...], dict[str, int], int]:
     if profile not in EXPERT_PROFILES:
         raise ValueError(f"Unknown expert profile {profile!r}")
     order = EXPERT_PROFILES[profile]
-    dimensions = {name: EXPERT_FEATURE_DIMS_FULL9[name] for name in order}
+    dimensions = {
+        name: (EXPERT_FEATURE_DIMS_FULL10 if profile == "full_10" else EXPERT_FEATURE_DIMS_FULL9)[name]
+        for name in order
+    }
     return order, dimensions, sum(dimensions.values())
 
 
@@ -133,6 +143,7 @@ TOP2_EXPERT_INPUT_CONTRACTS = MappingProxyType(
         "top2_m2d": EXPERT_INPUT_CONTRACTS["expert3"],
         "top2_mga": EXPERT_INPUT_CONTRACTS["expert2"],
         "m2d_lora": EXPERT_INPUT_CONTRACTS["expert3"],
+        "m2d_lora_coral": EXPERT_INPUT_CONTRACTS["expert3"],
     }
 )
 ALL_EXPERT_INPUT_CONTRACTS = MappingProxyType({**EXPERT_INPUT_CONTRACTS, **TOP2_EXPERT_INPUT_CONTRACTS})
@@ -164,6 +175,9 @@ EXPERT_REGISTRY = MappingProxyType(
         "top2_laion": ExpertRegistration("model.expert_adapters.top2_laion_adapter", "Top2LAIONAdapter", 2049),
         "top2_mga": ExpertRegistration("model.expert_adapters.top2_mga_adapter", "Top2MGAAdapter", 4097),
         "m2d_lora": ExpertRegistration("model.expert_adapters.m2d_lora_adapter", "M2DLoRAAdapter", 3073),
+        "m2d_lora_coral": ExpertRegistration(
+            "model.expert_adapters.m2d_lora_coral_adapter", "M2DLoRACoralAdapter", 3073
+        ),
     }
 )
 
@@ -394,6 +408,7 @@ def validate_and_assemble_expert_outputs(
 __all__ = [
     "EXPERT_FEATURE_DIMS",
     "EXPERT_FEATURE_DIMS_FULL9",
+    "EXPERT_FEATURE_DIMS_FULL10",
     "ALL_EXPERT_INPUT_CONTRACTS",
     "EXPERT_PROFILES",
     "EXPERT_INPUT_CONTRACTS",
@@ -401,7 +416,9 @@ __all__ = [
     "EXPERT_REGISTRY",
     "EXPECTED_FEATURE_WIDTH",
     "EXPECTED_FULL9_FEATURE_WIDTH",
+    "EXPECTED_FULL10_FEATURE_WIDTH",
     "FULL9_EXPERT_ORDER",
+    "FULL10_EXPERT_ORDER",
     "ExpertInputContract",
     "ExpertRegistration",
     "create_expert_adapter",

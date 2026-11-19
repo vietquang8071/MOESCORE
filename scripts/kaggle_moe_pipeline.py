@@ -29,7 +29,8 @@ from model.expert_adapters.registry import profile_contract
 from training.checkpoint_manager import MoeCheckpointManager
 from training.moe_evaluator import MoeGateEvaluator, compute_metrics, write_submission_csv
 from scripts.extract_moe_feature_store import (
-    EXPECTED_COUNTS, CHECKPOINT_FIELDS, FULL9_CHECKPOINT_FIELDS, fingerprint, projected_dataset,
+    EXPECTED_COUNTS, CHECKPOINT_FIELDS, FULL9_CHECKPOINT_FIELDS,
+    FULL10_CHECKPOINT_FIELDS, fingerprint, projected_dataset,
 )
 
 
@@ -51,7 +52,8 @@ def generate_configs(project_root, dataset_root, weights_root, cache_dir, featur
     config_dir = Path(config_dir)
     config_dir.mkdir(parents=True, exist_ok=True)
     profile_contract(profile)
-    template = "moe_full9.example.yaml" if profile == "full_9" else "moe_local.example.yaml"
+    template = ("moe_full10.example.yaml" if profile == "full_10" else
+                "moe_full9.example.yaml" if profile == "full_9" else "moe_local.example.yaml")
     expert = yaml.safe_load((project / "configs" / template).read_text())
     expert["paths"] = {"project_root": str(project), "data_root": str(dataset), "resource_root": str(project)}
     expert["runtime"] = {"device": "cuda:0", "offline": True, "cache_dir": str(Path(cache_dir).resolve())}
@@ -64,7 +66,7 @@ def generate_configs(project_root, dataset_root, weights_root, cache_dir, featur
         "expert4": {"beats_checkpoint": "pretrained/BEATs_iter3_plus_AS2M.pt", "clap_checkpoint": "pretrained/laion-clap.pt",
                     "finetuned_checkpoint": "finetuned_weights/expert4_best.pt"},
     }
-    if profile == "full_9":
+    if profile in {"full_9", "full_10"}:
         paths.update({
             "top2_m2d": {"checkpoint": "pretrained/checkpoint-30.pth"},
             "top2_msclap": {"checkpoint": "pretrained/CLAP_weights_2023.pth"},
@@ -72,10 +74,16 @@ def generate_configs(project_root, dataset_root, weights_root, cache_dir, featur
             "top2_mga": {"pretrained_checkpoint": "pretrained/mga-clap.pt"},
             "m2d_lora": {"base_checkpoint": "pretrained/checkpoint-30.pth", "finetuned_checkpoint": "best.pt"},
         })
-    selected_fields = {name: FULL9_CHECKPOINT_FIELDS[name] for name in profile_contract(profile)[0]}
+        if profile == "full_10":
+            paths["m2d_lora_coral"] = {
+                "base_checkpoint": "pretrained/checkpoint-30.pth",
+                "finetuned_checkpoint": "m2d-lora-Nam.pt",
+            }
+    checkpoint_fields = FULL10_CHECKPOINT_FIELDS if profile in {"full_9", "full_10"} else CHECKPOINT_FIELDS
+    selected_fields = {name: checkpoint_fields[name] for name in profile_contract(profile)[0]}
     if expert_checkpoints is not None:
         if set(expert_checkpoints) != set(selected_fields):
-            description = "the four registered experts" if profile == "top1_4" else "the nine full_9 experts"
+            description = "the four registered experts" if profile == "top1_4" else f"the {len(selected_fields)} {profile} experts"
             raise ValueError(f"expert_checkpoints must contain exactly {description}")
         paths = expert_checkpoints
     for name, fields in paths.items():
@@ -128,7 +136,7 @@ def check_dependencies(profile="top1_4"):
                 "transformers": "transformers", "laion_clap": "laion-clap", "timm": "timm",
                 "librosa": "librosa", "einops": "einops", "tqdm": "tqdm",
                 "torchlibrosa": "torchlibrosa", "nnAudio": "nnAudio", "matplotlib": "matplotlib"}
-    if profile == "full_9":
+    if profile in {"full_9", "full_10"}:
         required["msclap"] = "msclap"
     versions = {}
     for module, distribution in required.items():
@@ -138,8 +146,8 @@ def check_dependencies(profile="top1_4"):
         except Exception as exc:
             raise RuntimeError(f"Dependency {distribution} unavailable/incompatible: {exc}. "
                                "Supply compatible wheels or install explicitly; do not replace PyTorch/CUDA automatically.") from exc
-    if profile == "full_9" and versions["msclap"] != "1.3.4":
-        raise RuntimeError(f"full_9 requires msclap==1.3.4 for verified center crop; installed {versions['msclap']}")
+    if profile in {"full_9", "full_10"} and versions["msclap"] != "1.3.4":
+        raise RuntimeError(f"{profile} requires msclap==1.3.4 for verified center crop; installed {versions['msclap']}")
     return versions
 
 
@@ -171,10 +179,11 @@ def preflight(config, dataset_root, output_root, *, require_cuda=True, check_cac
     root = Path(output_root)
     root.mkdir(parents=True, exist_ok=True)
     report = {"environment": environment_report(require_cuda), "checkpoints": {}, "splits": {}}
-    if config.get("expert_profile", "top1_4") == "full_9":
-        report["dependencies"] = check_dependencies("full_9")
+    profile = config.get("expert_profile", "top1_4")
+    if profile in {"full_9", "full_10"}:
+        report["dependencies"] = check_dependencies(profile)
     for name in profile_contract(config.get("expert_profile", "top1_4"))[0]:
-        fields = FULL9_CHECKPOINT_FIELDS[name]
+        fields = FULL10_CHECKPOINT_FIELDS[name]
         report["checkpoints"][name] = {}
         for field in fields:
             path = Path(config["experts"][name][field])

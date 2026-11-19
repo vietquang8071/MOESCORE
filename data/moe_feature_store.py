@@ -177,12 +177,12 @@ class MoeFeatureStoreWriter:
         self.source_manifest_sha256 = source_manifest_sha256.lower()
         self.per_expert_cache_identities = _json_metadata(per_expert_cache_identities, "per_expert_cache_identities") if per_expert_cache_identities is not None else None
         self.assembly_identity = _json_metadata(assembly_identity, "assembly_identity") if assembly_identity is not None else None
-        if profile == "full_9" and (
+        if profile in {"full_9", "full_10"} and (
             not isinstance(self.per_expert_cache_identities, dict)
             or set(self.per_expert_cache_identities) != set(self.expert_order)
             or not isinstance(self.assembly_identity, dict)
         ):
-            raise ValueError("full_9 store requires ordered expert cache identities and assembly identity")
+            raise ValueError(f"{profile} store requires ordered expert cache identities and assembly identity")
         existing_manifest_path = self.split_root / "manifest.json"
         if existing_manifest_path.is_file():
             existing_manifest = validate_feature_store(self.root, split=self.split)
@@ -345,7 +345,7 @@ class MoeFeatureStoreWriter:
             "num_class_present": bool(num_class_present),
             "shards": entries,
         }
-        if self.profile == "full_9":
+        if self.profile in {"full_9", "full_10"}:
             body.update({
                 "expert_profile": self.profile,
                 "per_expert_cache_identities": self.per_expert_cache_identities,
@@ -392,10 +392,10 @@ def validate_feature_store(
     if version == FULL9_FEATURE_STORE_SCHEMA_VERSION:
         from data.moe_expert_cache import validate_assembly_identity, _expert_cache_id
         cache_ids = manifest.get("per_expert_cache_identities")
-        if (profile != "full_9" or not isinstance(cache_ids, dict)
+        if (profile not in {"full_9", "full_10"} or not isinstance(cache_ids, dict)
                 or set(cache_ids) != set(order) or not isinstance(manifest.get("assembly_identity"), dict)
                 or manifest.get("source_manifest_identity") != manifest.get("source_manifest_sha256")):
-            raise ValueError("full_9 store identity metadata is incomplete")
+            raise ValueError(f"{profile} store identity metadata is incomplete")
         assembly = manifest["assembly_identity"]
         validate_assembly_identity(assembly, expected_expert_order=order)
         verified_cache_ids = {name: _expert_cache_id(cache_ids[name], name=name) for name in order}
@@ -403,7 +403,7 @@ def validate_feature_store(
                 or assembly.get("feature_dimensions") != dimensions
                 or assembly.get("source_manifest_identity") != manifest["source_manifest_sha256"]
                 or assembly.get("expert_cache_identities") != verified_cache_ids):
-            raise ValueError("full_9 assembly identity differs from the store manifest")
+            raise ValueError(f"{profile} assembly identity differs from the store manifest")
     if manifest.get("split") != split:
         raise ValueError("feature-store split does not match the requested split")
     if tuple(manifest.get("expert_order", ())) != order:

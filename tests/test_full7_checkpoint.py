@@ -18,6 +18,7 @@ def test_full7_checkpoint_v4_resume_and_provenance(tmp_path):
     diagnostic = build_train_validation_audio_overlap_diagnostic([], [], allow_train_validation_audio_overlap=False)
     identity = {"train": "a" * 64, "validation": "b" * 64,
                 "preprocessing_contract": {"score_contracts": {"policy": "synthetic"}},
+                "score_review_policy": "EXPERIMENTAL_SKIPPED",
                 "source_wav_sha256_by_split": {"train": ["a" * 64], "validation": ["b" * 64]},
                 "source_sample_ids_by_split": {"train": ["train:a.wav"], "validation": ["validation:b.wav"]},
                 "audio_overlap_diagnostic": diagnostic}
@@ -25,7 +26,8 @@ def test_full7_checkpoint_v4_resume_and_provenance(tmp_path):
     path = tmp_path / "latest_gate.pt"
     manager.save(path, gating_network=gate, optimizer=optimizer, scheduler=scheduler,
                  epoch=1, global_step=3,
-                 config={"seed": 2027, "data": {"allow_train_validation_audio_overlap": False}},
+                 config={"seed": 2027, "data": {"allow_train_validation_audio_overlap": False,
+                                                       "score_review_policy": "EXPERIMENTAL_SKIPPED"}},
                  feature_store_identity=identity, expert_checkpoint_provenance=provenance,
                  sampler_state={"epoch": 1, "cursor": 2})
     saved = torch.load(path, weights_only=True)
@@ -37,13 +39,35 @@ def test_full7_checkpoint_v4_resume_and_provenance(tmp_path):
     opt = torch.optim.AdamW(restored.parameters())
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt)
     loaded = manager.load(path, gating_network=restored, optimizer=opt, scheduler=sched,
-                          expected_config={"seed": 2027, "data": {"allow_train_validation_audio_overlap": False}},
+                          expected_config={"seed": 2027, "data": {"allow_train_validation_audio_overlap": False,
+                                                                    "score_review_policy": "EXPERIMENTAL_SKIPPED"}},
                           expected_feature_store_identity=identity,
                           expected_expert_checkpoint_provenance=provenance)
     assert loaded["sampler_state"]["cursor"] == 2
     with pytest.raises(ValueError, match="configuration mismatch"):
         manager.load(path, gating_network=restored, optimizer=opt, scheduler=sched,
-                     expected_config={"seed": 2027, "data": {"allow_train_validation_audio_overlap": True}},
+                          expected_config={"seed": 2027, "data": {"allow_train_validation_audio_overlap": True,
+                                                                    "score_review_policy": "EXPERIMENTAL_SKIPPED"}},
+                     expected_feature_store_identity=identity,
+                     expected_expert_checkpoint_provenance=provenance)
+    human_identity = {**identity, "score_review_policy": "HUMAN_REVIEWED",
+                      "score_review_sha256": "c" * 64}
+    human_config = {"seed": 2027, "data": {"allow_train_validation_audio_overlap": False,
+                                           "score_review_policy": "HUMAN_REVIEWED"}}
+    with pytest.raises(ValueError, match="score review policy mismatch"):
+        manager.load(path, gating_network=restored, optimizer=opt, scheduler=sched,
+                     expected_config=human_config,
+                     expected_feature_store_identity=human_identity,
+                     expected_expert_checkpoint_provenance=provenance)
+    manager.save(path.with_name("human_gate.pt"), gating_network=gate, optimizer=optimizer,
+                 scheduler=scheduler, epoch=1, global_step=3, config=human_config,
+                 feature_store_identity=human_identity,
+                 expert_checkpoint_provenance=provenance)
+    with pytest.raises(ValueError, match="score review policy mismatch"):
+        manager.load(path.with_name("human_gate.pt"), gating_network=restored,
+                     optimizer=opt, scheduler=sched,
+                     expected_config={"seed": 2027, "data": {"allow_train_validation_audio_overlap": False,
+                                                               "score_review_policy": "EXPERIMENTAL_SKIPPED"}},
                      expected_feature_store_identity=identity,
                      expected_expert_checkpoint_provenance=provenance)
     with pytest.raises(ValueError, match="provenance"):
@@ -106,6 +130,7 @@ def test_full7_interrupted_step_matches_continuous_cpu(tmp_path):
     provenance = {name: {"sha256": f"{index + 1:064x}"} for index, name in enumerate(order)}
     identity = {"train": "a" * 64, "validation": "b" * 64,
                 "preprocessing_contract": {"synthetic": True},
+                "score_review_policy": "SYNTHETIC_NOT_APPLICABLE",
                 "source_wav_sha256_by_split": {"train": ["a" * 64], "validation": ["b" * 64]},
                 "source_sample_ids_by_split": {"train": ["train:a.wav"], "validation": ["validation:b.wav"]}}
     from data.audio_overlap import build_train_validation_audio_overlap_diagnostic
@@ -117,7 +142,8 @@ def test_full7_interrupted_step_matches_continuous_cpu(tmp_path):
     manager = MoeCheckpointManager()
     manager.save(path, gating_network=gate, optimizer=trainer.optimizer, scheduler=trainer.scheduler,
                  epoch=0, global_step=1,
-                 config={"seed": 2027, "data": {"allow_train_validation_audio_overlap": False}},
+                 config={"seed": 2027, "data": {"allow_train_validation_audio_overlap": False,
+                                                   "score_review_policy": "SYNTHETIC_NOT_APPLICABLE"}},
                  feature_store_identity=identity, expert_checkpoint_provenance=provenance,
                  sampler_state=sampler.state_dict())
     trainer.train_step(batch)
@@ -127,7 +153,8 @@ def test_full7_interrupted_step_matches_continuous_cpu(tmp_path):
     resumed = MoeGateTrainer(resumed_gate, loss)
     state = manager.load(path, gating_network=resumed_gate, optimizer=resumed.optimizer,
                          scheduler=resumed.scheduler,
-                         expected_config={"seed": 2027, "data": {"allow_train_validation_audio_overlap": False}},
+                         expected_config={"seed": 2027, "data": {"allow_train_validation_audio_overlap": False,
+                                                                   "score_review_policy": "SYNTHETIC_NOT_APPLICABLE"}},
                          expected_feature_store_identity=identity,
                          expected_expert_checkpoint_provenance=provenance)
     restored_sampler = StatefulRandomSampler(range(2), seed=2027)

@@ -38,6 +38,14 @@ from training.moe_trainer import MoeGateTrainer
 from training.sampler import StatefulRandomSampler
 from scripts.audit_full7_scores import audit_store
 
+EXPERIMENTAL_SKIPPED = "EXPERIMENTAL_SKIPPED"
+HUMAN_REVIEWED = "HUMAN_REVIEWED"
+SYNTHETIC_NOT_APPLICABLE = "SYNTHETIC_NOT_APPLICABLE"
+
+
+def _experimental_skip_score_review_enabled() -> bool:
+    return os.environ.get("MOESCORE_EXPERIMENTAL_SKIP_SCORE_REVIEW") == "1"
+
 
 def _real_score_review(path: str | Path | None, manifest: dict, audit: dict) -> str:
     """Require an explicit train-bound human score review before real optimization."""
@@ -62,6 +70,51 @@ def _real_score_review(path: str | Path | None, manifest: dict, audit: dict) -> 
             or any(body["experts"][name] != "REVIEWED_FOR_GATE_PROXY" for name in manifest["expert_order"])):
         raise ValueError("real Full7 score review is incomplete or bound to different evidence")
     return hashlib.sha256(target.read_bytes()).hexdigest()
+
+
+def _resolve_full7_score_review(
+    store_root: str | Path,
+    manifest: dict,
+    store_identity: dict[str, Any],
+    review_path: str | Path | None,
+    *,
+    skip_review: bool,
+) -> tuple[dict[str, Any], str | None, str, bool]:
+    """Run the train-only audit and bind the selected review policy to the store."""
+    audit = audit_store(store_root)
+    if manifest["assembly_identity"].get("synthetic_provenance"):
+        policy, review_sha256, human_review_performed = SYNTHETIC_NOT_APPLICABLE, None, False
+    elif skip_review:
+        policy, review_sha256, human_review_performed = EXPERIMENTAL_SKIPPED, None, False
+        print(
+            "\n*** EXPERIMENTAL WARNING: HUMAN SCORE REVIEW SKIPPED ***\n"
+            "The train-only score audit still ran, but expert score semantics were not "
+            "human-reviewed. This is a research-only run and is not independently "
+            "validated or a claim of competition compliance.\n",
+            file=sys.stderr,
+            flush=True,
+        )
+    else:
+        review_sha256 = _real_score_review(review_path, manifest, audit)
+        policy, human_review_performed = HUMAN_REVIEWED, True
+    store_identity["score_review_policy"] = policy
+    if review_sha256 is not None:
+        store_identity["score_review_sha256"] = review_sha256
+    else:
+        store_identity.pop("score_review_sha256", None)
+    return audit, review_sha256, policy, human_review_performed
+
+
+def _reject_accidental_checkpoint_overwrite(output_dir: str | Path, *, resume: str | None) -> None:
+    if resume is not None:
+        return
+    target = Path(output_dir)
+    existing = [name for name in ("latest_gate.pt", "best_gate.pt") if (target / name).exists()]
+    if existing:
+        raise FileExistsError(
+            f"Gate output directory already contains {', '.join(existing)}; "
+            "use a fresh output directory or an explicit compatible resume"
+        )
 
 
 def _interval_checkpoint_due(*, global_step: int, interval: int,
@@ -160,25 +213,34 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
         train_ds, validation_ds,
         allow_train_validation_audio_overlap=allow_audio_overlap,
     )
+    profile = train_ds.manifest.get("expert_profile", "top1_4")
     overlap_diagnostic = store_identity.get("audio_overlap_diagnostic")
     validation_warning = (
         overlap_diagnostic.get("warning") if isinstance(overlap_diagnostic, dict)
         and overlap_diagnostic.get("overlapping_sha256_count") else None
     )
+    skip_review = _experimental_skip_score_review_enabled()
+
     score_audit = None
     score_review_sha256 = None
-    if train_ds.manifest.get("expert_profile") == "full_7":
-        score_audit = audit_store(store_root)
-        if not train_ds.manifest["assembly_identity"].get("synthetic_provenance"):
-            score_review_sha256 = _real_score_review(config["data"].get("score_review_file"),
-                                                     train_ds.manifest, score_audit)
-            store_identity["score_review_sha256"] = score_review_sha256
+    score_review_policy = None
+    human_review_performed = False
+
+    if profile == "full_7":
+        (score_audit, score_review_sha256, score_review_policy,
+         human_review_performed) = _resolve_full7_score_review(
+            store_root,
+            train_ds.manifest,
+            store_identity,
+            config["data"].get("score_review_file"),
+            skip_review=skip_review,
+        )
+        config["data"]["score_review_policy"] = score_review_policy
     sampler = StatefulRandomSampler(train_ds, seed=config["runtime"]["seed"])
     train_loader = _feature_loader(train_ds, batch_size=config["training"]["batch_size"],
                                    sampler=sampler)
     validation_loader = _feature_loader(validation_ds,
                                         batch_size=config["validation"]["batch_size"])
-    profile = train_ds.manifest.get("expert_profile", "top1_4")
     if config["data"].get("profile", profile) != profile:
         raise ValueError("configured expert profile differs from Full7 feature store")
     order, _, width = profile_contract(profile)
@@ -197,6 +259,28 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
     output_dir.mkdir(parents=True, exist_ok=True)
     latest_path = output_dir / "latest_gate.pt"
     best_path = output_dir / "best_gate.pt"
+    if profile == "full_7":
+        _reject_accidental_checkpoint_overwrite(output_dir, resume=resume)
+    if profile == "full_7" and resume is not None:
+        for existing_path in (latest_path, best_path):
+            if not existing_path.is_file():
+                continue
+            try:
+                manager.load(
+                    existing_path,
+                    gating_network=gate,
+                    optimizer=trainer.optimizer,
+                    scheduler=trainer.scheduler,
+                    expected_config=run_config,
+                    expected_feature_store_identity=store_identity,
+                    expected_expert_checkpoint_provenance=checkpoint_provenance,
+                    restore_rng=False,
+                )
+            except Exception as exc:
+                raise ValueError(
+                    f"existing Gate checkpoint is incompatible ({existing_path}); "
+                    "refusing to overwrite it; use a fresh output directory"
+                ) from exc
     start_epoch = 0
     best_srcc: float | None = None
     patience = 0
@@ -334,6 +418,12 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
         "score_audit": score_audit,
         "score_review_sha256": score_review_sha256,
     }
+    if profile == "full_7":
+        report.update({
+            "score_review_policy": score_review_policy,
+            "human_review_performed": human_review_performed,
+            "run_purpose": "research_only",
+        })
     if overlap_diagnostic is not None:
         report["allow_train_validation_audio_overlap"] = allow_audio_overlap
         report["audio_overlap_diagnostic"] = overlap_diagnostic
@@ -375,6 +465,9 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
             "synthetic_provenance": train_ds.manifest["assembly_identity"]["synthetic_provenance"],
             "score_audit": score_audit,
             "score_review_sha256": score_review_sha256,
+            "score_review_policy": score_review_policy,
+            "human_review_performed": human_review_performed,
+            "run_purpose": "research_only",
             "allow_train_validation_audio_overlap": allow_audio_overlap,
             "audio_overlap_diagnostic": overlap_diagnostic,
             "validation_warning": validation_warning,

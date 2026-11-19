@@ -112,6 +112,7 @@ def _validate_gate_payload(payload: Mapping[str, Any], gate: GatingNetwork) -> N
                 or data_config["allow_train_validation_audio_overlap"]
                 != diagnostic["allow_train_validation_audio_overlap"]):
             raise ValueError("checkpoint Full7 overlap policy differs from its run configuration")
+        _validate_full7_review_identity(identity, config)
 
 
 def _canonical(value: Any, field: str) -> bytes:
@@ -147,6 +148,24 @@ def _validate_full7_overlap_identity(identity: Mapping[str, Any]) -> dict[str, A
     if recomputed != diagnostic:
         raise ValueError("Full7 checkpoint audio-overlap diagnostic differs from source membership")
     return diagnostic
+
+
+def _validate_full7_review_identity(identity: Mapping[str, Any], config: Mapping[str, Any]) -> str:
+    policy = identity.get("score_review_policy")
+    allowed = {"EXPERIMENTAL_SKIPPED", "HUMAN_REVIEWED", "SYNTHETIC_NOT_APPLICABLE"}
+    if not isinstance(config, Mapping) or not isinstance(policy, str) or policy not in allowed:
+        raise ValueError("Full7 checkpoint score review policy is missing or invalid")
+    data_config = config.get("data")
+    if not isinstance(data_config, Mapping) or data_config.get("score_review_policy") != policy:
+        raise ValueError("Full7 checkpoint score review policy differs from its run configuration")
+    review_sha256 = identity.get("score_review_sha256")
+    if policy == "HUMAN_REVIEWED":
+        if (not isinstance(review_sha256, str) or len(review_sha256) != 64
+                or any(char not in "0123456789abcdef" for char in review_sha256)):
+            raise ValueError("HUMAN_REVIEWED Full7 checkpoint requires the verified score-review SHA-256")
+    elif review_sha256 is not None:
+        raise ValueError(f"{policy} Full7 checkpoint cannot contain a human score-review SHA-256")
+    return policy
 
 
 def _to_cpu(value: Any) -> Any:
@@ -225,6 +244,7 @@ class MoeCheckpointManager:
             allow_overlap = config_body.get("data", {}).get("allow_train_validation_audio_overlap")
             if type(allow_overlap) is not bool or allow_overlap != diagnostic["allow_train_validation_audio_overlap"]:
                 raise ValueError("full_7 checkpoint configuration and overlap diagnostic differ")
+            _validate_full7_review_identity(identity_body, config_body)
         if sampler_state is not None:
             sampler_body = json.loads(_canonical(dict(sampler_state), "sampler_state").decode("utf-8"))
         else:
@@ -297,6 +317,11 @@ class MoeCheckpointManager:
             raise ValueError(
                 "legacy Full7 gate checkpoint cannot resume because it does not record the explicit train/validation audio-overlap policy"
             )
+        if payload.get("format_version") == FULL7_CHECKPOINT_FORMAT_VERSION:
+            actual_policy = payload["feature_store_identity"].get("score_review_policy")
+            expected_policy = expected_feature_store_identity.get("score_review_policy")
+            if actual_policy != expected_policy:
+                raise ValueError("gating checkpoint score review policy mismatch")
         expected_values = (
             ("config", dict(expected_config), "configuration"),
             ("feature_store_identity", dict(expected_feature_store_identity), "feature store identity"),

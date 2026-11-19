@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -76,6 +77,20 @@ class TargetTransformTests(unittest.TestCase):
         self.assertAlmostEqual(result["mean_feasibility_distance"], 2 / 3, places=6)
         self.assertAlmostEqual(result["max_feasibility_distance"], 1.0, places=6)
         self.assertAlmostEqual(result["mean_squared_error_lower_bound"], 2 / 3, places=6)
+
+
+class Full7ReviewPolicyTests(unittest.TestCase):
+    def test_experimental_score_review_requires_exact_environment_value(self):
+        from scripts.train_moe_gating import _experimental_skip_score_review_enabled
+
+        for value in (None, "true", "True", "01", "0"):
+            with self.subTest(value=value), patch.dict("os.environ", {}, clear=True):
+                if value is not None:
+                    import os
+                    os.environ["MOESCORE_EXPERIMENTAL_SKIP_SCORE_REVIEW"] = value
+                self.assertFalse(_experimental_skip_score_review_enabled())
+        with patch.dict("os.environ", {"MOESCORE_EXPERIMENTAL_SKIP_SCORE_REVIEW": "1"}, clear=True):
+            self.assertTrue(_experimental_skip_score_review_enabled())
 
 
 class MoeGateTrainerTests(unittest.TestCase):

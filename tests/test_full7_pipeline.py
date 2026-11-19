@@ -170,8 +170,14 @@ def test_build_full7_from_trusted_synthetic_heads(tmp_path):
     trained = run_training(config)
     assert trained["global_step"] == 1
     assert trained["history"][0]["train_rows_used"] == 2
+    assert trained["score_review_policy"] == "SYNTHETIC_NOT_APPLICABLE"
+    assert trained["human_review_performed"] is False
+    assert trained["run_purpose"] == "research_only"
     run_manifest = json.loads((tmp_path / "run" / "run_manifest.json").read_text())
     assert run_manifest["expert_profile"] == "full_7"
+    assert run_manifest["score_review_policy"] == "SYNTHETIC_NOT_APPLICABLE"
+    assert run_manifest["human_review_performed"] is False
+    assert run_manifest["run_purpose"] == "research_only"
     assert run_manifest["train_store_identity_sha256"] == store.identity
     assert run_manifest["allow_train_validation_audio_overlap"] is True
     assert run_manifest["audio_overlap_diagnostic"]["overlapping_sha256_count"] == 1

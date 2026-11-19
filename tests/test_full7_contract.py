@@ -23,7 +23,18 @@ def test_full7_order_width_and_slices():
     weights = gate(features)
     assert weights.shape == (2, 7)
     assert torch.allclose(weights.sum(1), torch.ones(2))
-    assert torch.allclose((scores * weights).sum(1, keepdim=True), (scores * weights).sum(1, keepdim=True))
+    prediction = (scores * weights).sum(dim=1, keepdim=True)
+    expert_scores = torch.arange(
+        1,
+        8,
+        dtype=weights.dtype,
+        device=weights.device,
+    )
+
+    expected_prediction = (weights @ expert_scores).unsqueeze(1)
+
+    assert prediction.shape == (2, 1)
+    torch.testing.assert_close(prediction, expected_prediction)
 
 
 def test_full7_rejects_full9_source_name():

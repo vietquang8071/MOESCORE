@@ -3,7 +3,8 @@
 import hashlib
 import json
 import shutil
-
+import subprocess
+from pathlib import Path
 import numpy as np
 import pytest
 import torch
@@ -151,7 +152,20 @@ def test_build_full7_from_trusted_synthetic_heads(tmp_path):
     run_manifest = json.loads((tmp_path / "run" / "run_manifest.json").read_text())
     assert run_manifest["expert_profile"] == "full_7"
     assert run_manifest["train_store_identity_sha256"] == store.identity
-    assert run_manifest["working_tree_dirty"] is True
+    project_root = Path(__file__).resolve().parents[1]
+
+    git_status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    expected_dirty = bool(git_status.stdout.strip())
+
+    assert isinstance(run_manifest["working_tree_dirty"], bool)
+    assert run_manifest["working_tree_dirty"] == expected_dirty
     assert run_manifest["source_code_sha256"]["model/moe_gating_core.py"]
     checkpoint = trained["best_checkpoint"]
     assert checkpoint is not None

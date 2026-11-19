@@ -1,0 +1,24 @@
+schema_version: 1
+runtime:
+  device: auto
+  seed: 2027
+data:
+  feature_store_root: ../full7_feature_stores
+  profile: full_7
+output_dir: ../runs/moe_full7
+training:
+  batch_size: 8
+  max_epochs: 50
+  learning_rate: 0.00001
+  weight_decay: 0.0001
+  diversity_weight: 0.2
+  early_stop_patience: 50
+  checkpoint_interval_steps: 1000
+  loss:
+    loss_weights: [1.0, 0.5]
+    clipped_mse: {tau: 0.25, mode: utt, beta: 0.99, cbl: false}
+    contrastive: {margin: 0.1, beta: 0.99, cbl: false}
+validation:
+  batch_size: 8
+inference:
+  batch_size: 64

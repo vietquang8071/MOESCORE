@@ -5,8 +5,12 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
+import os
 from pathlib import Path
+import platform
+import subprocess
 import sys
 from typing import Any, Sequence
 
@@ -21,11 +25,43 @@ from data.moe_training_dataset import MoeTrainingDataset, collate_moe_features
 from data.moe_feature_store import preprocessing_contract
 from model.moe_gating_core import GatingNetwork
 from model.expert_adapters.registry import profile_contract
-from training.checkpoint_manager import MoeCheckpointManager
+from training.checkpoint_manager import MoeCheckpointManager, full7_source_code_sha256
 from training.config import load_moe_training_config
 from training.moe_evaluator import MoeGateEvaluator
 from training.moe_trainer import MoeGateTrainer
 from training.sampler import StatefulRandomSampler
+from scripts.audit_full7_scores import audit_store
+
+
+def _real_score_review(path: str | Path | None, manifest: dict, audit: dict) -> str:
+    """Require an explicit train-bound human score review before real optimization."""
+    if path is None:
+        raise ValueError("real Full7 training requires a score review file after train-only audit")
+    target = Path(path).expanduser().resolve()
+    try:
+        body = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"real Full7 score review cannot be read: {exc}") from exc
+    def fingerprint(value: Any) -> str:
+        return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                         ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+    if (not isinstance(body, dict) or body.get("schema_version") != 1
+            or body.get("train_store_identity_sha256") != manifest["store_identity_sha256"]
+            or body.get("score_contract_sha256") != fingerprint(manifest["score_contracts"])
+            or body.get("score_audit_sha256") != fingerprint(audit["diagnostics"])
+            or not isinstance(body.get("reviewer"), str) or not body["reviewer"].strip()
+            or not isinstance(body.get("evidence"), str) or not body["evidence"].strip()
+            or not isinstance(body.get("experts"), dict)
+            or set(body["experts"]) != set(manifest["expert_order"])
+            or any(body["experts"][name] != "REVIEWED_FOR_GATE_PROXY" for name in manifest["expert_order"])):
+        raise ValueError("real Full7 score review is incomplete or bound to different evidence")
+    return hashlib.sha256(target.read_bytes()).hexdigest()
+
+
+def _interval_checkpoint_due(*, global_step: int, interval: int,
+                             sampler_cursor: int, sample_count: int, batch_size: int) -> bool:
+    """Keep the final full batch's checkpoint until epoch validation completes."""
+    return global_step % interval == 0 and sample_count - sampler_cursor >= batch_size
 
 
 def _device(value: str) -> torch.device:
@@ -58,11 +94,23 @@ def _store_provenance(train: MoeTrainingDataset, validation: MoeTrainingDataset)
     train_contract, val_contract = preprocessing_contract(train_manifest), preprocessing_contract(val_manifest)
     if train_contract != val_contract:
         raise ValueError("train and validation preprocessing contracts differ")
+    if train_manifest.get("expert_profile") == "full_7":
+        train_rows = train_manifest["assembly_identity"].get("ordered_source_fingerprints", [])
+        validation_rows = val_manifest["assembly_identity"].get("ordered_source_fingerprints", [])
+        train_wavs = {row["wav_sha256"].lower() for row in train_rows}
+        shared_wavs = train_wavs.intersection(row["wav_sha256"].lower() for row in validation_rows)
+        if shared_wavs:
+            raise ValueError(f"cross-split duplicate WAV SHA-256: {sorted(shared_wavs)[0]}")
     identity = {
         "train": train.identity,
         "validation": validation.identity,
         "preprocessing_contract": train_contract,
     }
+    if train_manifest.get("expert_profile") == "full_7":
+        identity["source_wav_sha256_by_split"] = {
+            "train": [row["wav_sha256"].lower() for row in train_rows],
+            "validation": [row["wav_sha256"].lower() for row in validation_rows],
+        }
     return train_provenance, identity
 
 
@@ -75,6 +123,14 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
     train_ds = MoeTrainingDataset(store_root, split="train", require_labels=True)
     validation_ds = MoeTrainingDataset(store_root, split="validation", require_labels=True)
     checkpoint_provenance, store_identity = _store_provenance(train_ds, validation_ds)
+    score_audit = None
+    score_review_sha256 = None
+    if train_ds.manifest.get("expert_profile") == "full_7":
+        score_audit = audit_store(store_root)
+        if not train_ds.manifest["assembly_identity"].get("synthetic_provenance"):
+            score_review_sha256 = _real_score_review(config["data"].get("score_review_file"),
+                                                     train_ds.manifest, score_audit)
+            store_identity["score_review_sha256"] = score_review_sha256
     sampler = StatefulRandomSampler(train_ds, seed=config["runtime"]["seed"])
     train_loader = DataLoader(
         train_ds,
@@ -94,6 +150,8 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
         collate_fn=collate_moe_features,
     )
     profile = train_ds.manifest.get("expert_profile", "top1_4")
+    if config["data"].get("profile", profile) != profile:
+        raise ValueError("configured expert profile differs from Full7 feature store")
     order, _, width = profile_contract(profile)
     gate = GatingNetwork(input_feature_dim=width, num_experts=len(order), profile=profile).to(device)
     trainer = MoeGateTrainer(
@@ -150,7 +208,11 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
             train_loss_sum += float(result["total_loss"].item())
             train_batches += 1
             interval = config["training"]["checkpoint_interval_steps"]
-            if trainer.global_step % interval == 0:
+            if (trainer.global_step % interval == 0 and
+                    (profile != "full_7" or _interval_checkpoint_due(
+                        global_step=trainer.global_step, interval=interval,
+                        sampler_cursor=sampler.cursor, sample_count=len(train_ds),
+                        batch_size=config["training"]["batch_size"]))):
                 manager.save(
                     latest_path,
                     gating_network=gate,
@@ -195,6 +257,8 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
         history.append({
             "epoch": epoch,
             "global_step": trainer.global_step,
+            "train_rows_used": train_batches * config["training"]["batch_size"],
+            "train_rows_available": len(train_ds),
             "train_loss": train_loss_sum / train_batches,
             "validation_loss_normalized": validation_loss,
             "validation_metrics_raw": validation["metrics"],
@@ -220,7 +284,7 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
         )
         if patience >= config["training"]["early_stop_patience"] > 0:
             break
-    return {
+    report = {
         "status": "PASS",
         "device": str(device),
         "epochs_completed": len(history),
@@ -231,7 +295,53 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
         "history": history,
         "expert_model_construction": False,
         "expert_checkpoint_deserialization": False,
+        "score_audit": score_audit,
+        "score_review_sha256": score_review_sha256,
     }
+    if profile == "full_7":
+        def file_hash(path: Path) -> str | None:
+            if not path.is_file():
+                return None
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return digest.hexdigest()
+
+        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT,
+                                capture_output=True, text=True, check=False)
+        git_status = subprocess.run(["git", "status", "--porcelain"], cwd=PROJECT_ROOT,
+                                    capture_output=True, text=True, check=False)
+        manifest = {
+            "schema_version": 1, "expert_profile": "full_7",
+            "git_commit": commit.stdout.strip() if commit.returncode == 0 else None,
+            "working_tree_dirty": bool(git_status.stdout.strip()) if git_status.returncode == 0 else None,
+            "source_code_sha256": full7_source_code_sha256(),
+            "python_version": platform.python_version(), "torch_version": str(torch.__version__),
+            "config_sha256": hashlib.sha256(json.dumps(run_config, sort_keys=True,
+                separators=(",", ":"), allow_nan=False).encode()).hexdigest(),
+            "train_store_identity_sha256": train_ds.identity,
+            "validation_store_identity_sha256": validation_ds.identity,
+            "source_contract": store_identity["preprocessing_contract"],
+            "expert_checkpoint_provenance": checkpoint_provenance,
+            "gate_checkpoint_sha256": file_hash(best_path),
+            "latest_gate_checkpoint_sha256": file_hash(latest_path),
+            "seed": config["runtime"]["seed"], "device": str(device), "dtype": "float32",
+            "split_policy": "train_gradient_validation_evaluation_test_inference",
+            "selection_policy": "official_validation_srcc_strict_v1_provisional",
+            "invocation": sys.argv if Path(sys.argv[0]).name == "train_moe_gating.py"
+                          else ["run_training(programmatic)"],
+            "synthetic_provenance": train_ds.manifest["assembly_identity"]["synthetic_provenance"],
+            "score_audit": score_audit,
+            "score_review_sha256": score_review_sha256,
+            "history": history,
+        }
+        temporary = output_dir / f"run_manifest.json.{os.getpid()}.tmp"
+        temporary.write_text(json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n",
+                             encoding="utf-8")
+        os.replace(temporary, output_dir / "run_manifest.json")
+        report["run_manifest"] = str(output_dir / "run_manifest.json")
+    return report
 
 
 def main(argv: Sequence[str] | None = None) -> int:

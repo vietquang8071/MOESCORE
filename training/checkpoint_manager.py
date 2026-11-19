@@ -18,11 +18,29 @@ from model.moe_gating_core import GatingNetwork
 
 CHECKPOINT_FORMAT_VERSION = 1
 FULL9_CHECKPOINT_FORMAT_VERSION = 2
+FULL7_CHECKPOINT_FORMAT_VERSION = 3
+FULL7_GATE_ARCHITECTURE = {"input_width": 29959, "hidden_width": 512,
+                           "normalization": "LayerNorm", "activation": "ReLU",
+                           "dropout": 0.1, "output_width": 7, "output": "Softmax(dim=-1)"}
+_FULL7_SOURCE_FILES = (
+    "model/moe_gating_core.py", "training/moe_trainer.py", "training/moe_evaluator.py",
+    "training/target_transform.py", "training/checkpoint_manager.py",
+    "loss/loss_function.py", "data/full7_assembler.py", "data/full7_score_contract.py",
+    "data/moe_feature_store.py", "model/expert_adapters/registry.py",
+    "scripts/train_moe_gating.py", "scripts/evaluate_moe_gating.py",
+    "scripts/infer_moe_gating.py", "scripts/audit_full7_scores.py",
+)
+
+
+def full7_source_code_sha256() -> dict[str, str]:
+    root = Path(__file__).parents[1]
+    return {name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+            for name in _FULL7_SOURCE_FILES}
 
 
 def _validate_gate_payload(payload: Mapping[str, Any], gate: GatingNetwork) -> None:
     version = payload.get("format_version")
-    if version not in {CHECKPOINT_FORMAT_VERSION, FULL9_CHECKPOINT_FORMAT_VERSION}:
+    if version not in {CHECKPOINT_FORMAT_VERSION, FULL9_CHECKPOINT_FORMAT_VERSION, FULL7_CHECKPOINT_FORMAT_VERSION}:
         raise ValueError("unsupported gating checkpoint schema")
     profile = "top1_4" if version == CHECKPOINT_FORMAT_VERSION else payload.get("expert_profile")
     order, dimensions, width = profile_contract(profile)
@@ -37,6 +55,21 @@ def _validate_gate_payload(payload: Mapping[str, Any], gate: GatingNetwork) -> N
         or not all(payload["feature_store_identity"].get(key) for key in ("train", "validation", "preprocessing_contract"))
     ):
         raise ValueError("checkpoint full_9 order, dimensions, or provenance are incompatible")
+    if version == FULL7_CHECKPOINT_FORMAT_VERSION and (
+        profile != "full_7" or payload.get("expert_order") != list(order)
+        or payload.get("expert_feature_dimensions") != dimensions
+        or payload.get("gate_architecture") != FULL7_GATE_ARCHITECTURE
+        or payload.get("source_code_sha256") != full7_source_code_sha256()
+        or payload.get("selection_policy") != "official_validation_srcc_strict_v1_provisional"
+        or not isinstance(payload.get("expert_checkpoint_provenance"), Mapping)
+        or set(payload["expert_checkpoint_provenance"]) != set(order)
+        or not isinstance(payload.get("feature_store_identity"), Mapping)
+        or not all(payload["feature_store_identity"].get(key) for key in
+                   ("train", "validation", "preprocessing_contract"))
+        or not isinstance(payload["feature_store_identity"].get("source_wav_sha256_by_split"), Mapping)
+        or set(payload["feature_store_identity"]["source_wav_sha256_by_split"]) != {"train", "validation"}
+    ):
+        raise ValueError("checkpoint full_7 architecture, source code, order, or provenance are incompatible")
 
 
 def _canonical(value: Any, field: str) -> bytes:
@@ -111,18 +144,25 @@ class MoeCheckpointManager:
         provenance_body = json.loads(_canonical(dict(expert_checkpoint_provenance), "expert_checkpoint_provenance").decode("utf-8"))
         if not identity_body or not provenance_body:
             raise ValueError("feature-store identity and expert checkpoint provenance are required")
-        if gating_network.profile == "full_9" and (
+        if gating_network.profile in {"full_9", "full_7"} and (
             set(provenance_body) != set(order)
             or not all(identity_body.get(key) for key in ("train", "validation", "preprocessing_contract"))
         ):
-            raise ValueError("full_9 checkpoint requires complete expert and store provenance")
+            raise ValueError("full profile checkpoint requires complete expert and store provenance")
+        if gating_network.profile == "full_7" and (
+            not isinstance(identity_body.get("source_wav_sha256_by_split"), dict)
+            or set(identity_body["source_wav_sha256_by_split"]) != {"train", "validation"}
+        ):
+            raise ValueError("full_7 checkpoint requires train/validation WAV provenance")
         if sampler_state is not None:
             sampler_body = json.loads(_canonical(dict(sampler_state), "sampler_state").decode("utf-8"))
         else:
             sampler_body = None
         gate_state = {key: value.detach().cpu().clone() for key, value in gating_network.state_dict().items()}
         payload = {
-            "format_version": (CHECKPOINT_FORMAT_VERSION if gating_network.profile == "top1_4" else FULL9_CHECKPOINT_FORMAT_VERSION),
+            "format_version": {"top1_4": CHECKPOINT_FORMAT_VERSION,
+                               "full_9": FULL9_CHECKPOINT_FORMAT_VERSION,
+                               "full_7": FULL7_CHECKPOINT_FORMAT_VERSION}[gating_network.profile],
             "gate_input_dim": gating_network.input_feature_dim,
             "gate_expert_count": gating_network.num_experts,
             "gating_state_dict": gate_state,
@@ -144,7 +184,7 @@ class MoeCheckpointManager:
             "cuda_rng_states": [state.cpu().clone() for state in torch.cuda.get_rng_state_all()]
             if torch.cuda.is_available() and torch.cuda.is_initialized() else [],
         }
-        if gating_network.profile == "full_9":
+        if gating_network.profile in {"full_9", "full_7"}:
             payload.update({
                 "expert_profile": gating_network.profile,
                 "expert_order": list(order),
@@ -152,6 +192,10 @@ class MoeCheckpointManager:
                 "training_config": config_body,
                 "preprocessing_identity": identity_body.get("preprocessing_contract"),
             })
+        if gating_network.profile == "full_7":
+            payload.update({"gate_architecture": FULL7_GATE_ARCHITECTURE,
+                            "selection_policy": "official_validation_srcc_strict_v1_provisional",
+                            "source_code_sha256": full7_source_code_sha256()})
         target = Path(path).expanduser().resolve()
         _atomic_torch_save(payload, target)
         return target
@@ -258,4 +302,4 @@ class MoeCheckpointManager:
         return payload
 
 
-__all__ = ["CHECKPOINT_FORMAT_VERSION", "MoeCheckpointManager"]
+__all__ = ["CHECKPOINT_FORMAT_VERSION", "FULL7_CHECKPOINT_FORMAT_VERSION", "MoeCheckpointManager"]

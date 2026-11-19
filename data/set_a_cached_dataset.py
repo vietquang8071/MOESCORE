@@ -363,12 +363,15 @@ class SetACachedDataset(Dataset):
     ) -> None:
         if split not in {"train", "validation", "test"}:
             raise ValueError("split must be train, validation, or test")
+        if require_labels is not None and type(require_labels) is not bool:
+            raise TypeError("require_labels must be bool or None")
         if split == "train" and require_labels is False:
             raise ValueError("Set A training split must require raw labels")
         if require_labels is None:
             require_labels = split == "train"
         self.root = Path(root).expanduser().resolve()
         self.split = split
+        self.require_labels = require_labels
         self.group_ids: list[str] | None = None
         split_root = self.root / split
         if (split_root / "set_a_manifest.json").is_file():
@@ -432,6 +435,8 @@ class SetACachedDataset(Dataset):
             split=self.split,
             expected_sha256=self.manifest["source_manifest_sha256"],
         )
+        if require_labels and any(record.get("label_raw") is None for record in self.source_records):
+            raise ValueError(f"Set A {self.split} source manifest is missing required labels")
         self.group_ids = _group_ids_from_records(self.source_records)
         indexed_ids = [sample_id for shard in self.manifest["shards"] for sample_id in shard["sample_ids"]]
         indexed_names = [name for shard in self.manifest["shards"] for name in shard["wave_file_names"]]
@@ -635,14 +640,20 @@ class SetACachedDataset(Dataset):
             "split": self.split,
             "component_outputs": components,
         }
-        if self.split == "train":
-            if label_raw is None:
+        if self.split in {"train", "validation"}:
+            if self.split == "train" and label_raw is None:
                 raise ValueError("Set A training cache row is missing its raw target")
+            if self.require_labels and label_raw is None:
+                raise ValueError(f"Set A {self.split} cache row is missing its raw target")
+            if label_raw is None:
+                return result
             expected_label = source_record.get("label_raw")
-            if expected_label is None or not _labels_match_float32(
-                label_raw, expected_label, field=f"{self.split} cache row {index}"
-            ):
-                raise ValueError("Set A training target differs from the source manifest")
+            if expected_label is None:
+                if self.require_labels or self.split == "train":
+                    raise ValueError(f"Set A {self.split} source manifest is missing its raw target")
+                return result
+            if not _labels_match_float32(label_raw, expected_label, field=f"{self.split} cache row {index}"):
+                raise ValueError(f"Set A {self.split} target differs from the source manifest")
             result["label_raw"] = label_raw
             result["target_normalized"] = (label_raw - 5.0) / 5.0
         return result

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -55,29 +56,115 @@ def _head_membership(split: str, sample_ids: list[str], source_manifest_sha256: 
                        "per_row": ["SYNTHETIC_UNTRAINED_HEAD"] * len(sample_ids)}
                 for name in ("expert5", "expert6")}
     state = e5_payload.get("training_state", {})
-    fit, holdout = state.get("fit_sample_ids"), state.get("holdout_sample_ids")
-    e5_train_source = e5_payload.get("data_provenance", {}).get("source_manifest_sha256")
+    e5_provenance = e5_payload.get("data_provenance", {})
+    e5_train_source = e5_provenance.get("source_manifest_sha256")
     e6_train_source = e6_payload.get("dataset_provenance", {}).get("train", {}).get("full9_source_manifest_sha256")
-    if (not isinstance(fit, list) or not isinstance(holdout, list) or not fit or not holdout
+    if not isinstance(e6_train_source, str) or len(e6_train_source) != 64:
+        raise ValueError("E6 real training source-manifest provenance is incomplete")
+    try:
+        int(e6_train_source, 16)
+    except ValueError as exc:
+        raise ValueError("E6 real training source-manifest identity is invalid") from exc
+
+    if state.get("selection_policy") == "official_validation_mse_v1":
+        train_ids = state.get("train_sample_ids")
+        validation_ids = state.get("validation_sample_ids")
+        train_provenance = state.get("train_provenance")
+        validation_provenance = state.get("validation_provenance")
+
+        def validate_split_membership(ids, provenance, expected_split):
+            if (
+                not isinstance(ids, list)
+                or not ids
+                or any(not isinstance(value, str) or not value.startswith(expected_split + ":") for value in ids)
+                or len(ids) != len(set(ids))
+                or not isinstance(provenance, dict)
+                or provenance.get("split") != expected_split
+                or provenance.get("sample_count") != len(ids)
+                or provenance.get("ordered_sample_ids_sha256") != hashlib.sha256(
+                    json.dumps(ids, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                ).hexdigest()
+                or not isinstance(provenance.get("source_manifest_sha256"), str)
+                or len(provenance["source_manifest_sha256"]) != 64
+            ):
+                raise ValueError(f"E5 official {expected_split} membership provenance is incomplete")
+            try:
+                int(provenance["source_manifest_sha256"], 16)
+            except ValueError as exc:
+                raise ValueError(f"E5 official {expected_split} source-manifest identity is invalid") from exc
+
+        validate_split_membership(train_ids, train_provenance, "train")
+        validate_split_membership(validation_ids, validation_provenance, "validation")
+        if e5_provenance != train_provenance or set(train_ids) & set(validation_ids):
+            raise ValueError("E5 official train provenance or split membership is inconsistent")
+        e5_validation_source = validation_provenance["source_manifest_sha256"]
+        if e5_train_source == e5_validation_source:
+            raise ValueError("E5 official train and validation source manifests are identical")
+
+        if split == "train":
+            if train_ids != sample_ids or e5_train_source != source_manifest_sha256:
+                raise ValueError("E5 official train membership differs from Full7 source")
+            e5_statuses = ["IN_SAMPLE_FIT" for _ in sample_ids]
+        elif split == "validation":
+            if validation_ids != sample_ids or e5_validation_source != source_manifest_sha256:
+                raise ValueError("E5 official validation membership differs from Full7 source")
+            e5_statuses = ["OUT_OF_SAMPLE_FIT_VALIDATION_SELECTED" for _ in sample_ids]
+        else:
+            if (
+                source_manifest_sha256 in {e5_train_source, e5_validation_source}
+                or set(sample_ids).intersection(train_ids + validation_ids)
+            ):
+                raise ValueError("E5 official test split overlaps train or validation membership")
+            e5_statuses = ["OUT_OF_SAMPLE" for _ in sample_ids]
+        e5_membership = {
+            "synthetic": False,
+            "selection_policy": "official_validation_mse_v1",
+            "train_source_manifest_sha256": e5_train_source,
+            "validation_source_manifest_sha256": e5_validation_source,
+            "train_sample_count": len(train_ids),
+            "validation_sample_count": len(validation_ids),
+            "per_row": e5_statuses,
+        }
+        e5_train_sample_ids = train_ids
+    else:
+        fit, holdout = state.get("fit_sample_ids"), state.get("holdout_sample_ids")
+        if (
+            not isinstance(fit, list) or not isinstance(holdout, list) or not fit or not holdout
             or len(fit + holdout) != len(set(fit + holdout))
             or not isinstance(e5_train_source, str) or len(e5_train_source) != 64
-            or not isinstance(e6_train_source, str) or len(e6_train_source) != 64):
-        raise ValueError("E5/E6 real training membership provenance is incomplete")
-    if split == "train" and (set(fit + holdout) != set(sample_ids)
-                             or e5_train_source != source_manifest_sha256
-                             or e6_train_source != source_manifest_sha256):
-        raise ValueError("E5/E6 real train membership differs from Full7 source")
-    if split != "train" and (e5_train_source == source_manifest_sha256
-                              or e6_train_source == source_manifest_sha256
-                              or set(sample_ids).intersection(fit + holdout)):
+        ):
+            raise ValueError("E5 legacy holdout membership provenance is incomplete")
+        if split == "train":
+            if set(fit + holdout) != set(sample_ids) or e5_train_source != source_manifest_sha256:
+                raise ValueError("E5 legacy train membership differs from Full7 source")
+        elif e5_train_source == source_manifest_sha256 or set(sample_ids).intersection(fit + holdout):
+            raise ValueError("E5 legacy inference split overlaps training membership")
+        fit_set, holdout_set = set(fit), set(holdout)
+        e5_train_sample_ids = fit + holdout
+        e5_statuses = [
+            "IN_SAMPLE_FIT" if sample_id in fit_set else
+            "OUT_OF_SAMPLE_FIT_SELECTION_HOLDOUT" if sample_id in holdout_set else
+            "OUT_OF_SAMPLE"
+            for sample_id in sample_ids
+        ]
+        e5_membership = {
+            "synthetic": False,
+            "selection_policy": "legacy_internal_train_holdout",
+            "train_source_manifest_sha256": e5_train_source,
+            "fit_sample_count": len(fit),
+            "holdout_sample_count": len(holdout),
+            "per_row": e5_statuses,
+        }
+
+    if split == "train" and e6_train_source != source_manifest_sha256:
+        raise ValueError("E6 real train source differs from Full7 source")
+    if split != "train" and (
+        e6_train_source == source_manifest_sha256
+        or set(sample_ids).intersection(e5_train_sample_ids)
+    ):
         raise ValueError("E5/E6 real inference split overlaps training membership")
-    fit_set, holdout_set = set(fit), set(holdout)
     return {
-        "expert5": {"synthetic": False, "train_source_manifest_sha256": e5_train_source,
-                    "fit_sample_count": len(fit), "holdout_sample_count": len(holdout),
-                    "per_row": ["IN_SAMPLE_FIT" if sample_id in fit_set else
-                                "OUT_OF_SAMPLE_FIT_SELECTION_HOLDOUT" if sample_id in holdout_set else
-                                "OUT_OF_SAMPLE" for sample_id in sample_ids]},
+        "expert5": e5_membership,
         "expert6": {"synthetic": False, "train_source_manifest_sha256": e6_train_source,
                     "per_row": ["IN_SAMPLE_FIT" if split == "train" else
                                 "OUT_OF_SAMPLE_FIT_VALIDATION_SELECTED" if split == "validation" else

@@ -19,7 +19,7 @@ training:
   weight_decay: 0.0001
   gradient_clip: 1.0
   seed: 42
-  holdout_fraction: 0.15
+  selection_metric: official_validation_mse
   early_stopping_patience: 5
   min_delta: 0.0
 

@@ -30,12 +30,22 @@ def main() -> int:
     args = _arguments()
     config = load_set_a_config(args.config)
     training = config["training"]
-    source_manifest = config["source_manifest_paths"].get("train")
-    dataset = SetACachedDataset(
+    train_dataset = SetACachedDataset(
         config["feature_store_root"],
         split="train",
-        source_manifest_path=source_manifest,
+        require_labels=True,
+        source_manifest_path=config["source_manifest_paths"].get("train"),
     )
+
+    validation_dataset = SetACachedDataset(
+        config["feature_store_root"],
+        split="validation",
+        require_labels=True,
+        source_manifest_path=config["source_manifest_paths"].get("validation"),
+    )
+
+    print(f"E5 train samples: {len(train_dataset)}")
+    print(f"E5 validation samples: {len(validation_dataset)}")
     set_deterministic_seed(training["seed"])
     model = SetAResidualAdapter(
         SetAResidualHead(
@@ -50,13 +60,13 @@ def main() -> int:
         gradient_clip=training["gradient_clip"],
         seed=training["seed"],
         device=config["runtime"]["device"],
-        holdout_fraction=training["holdout_fraction"],
         early_stopping_patience=training["early_stopping_patience"],
         min_delta=training["min_delta"],
     )
     resume = args.resume or config["resume_from"]
     history = trainer.fit(
-        dataset,
+        train_dataset=train_dataset,
+        validation_dataset=validation_dataset,
         epochs=training["epochs"],
         batch_size=training["batch_size"],
         num_workers=training["num_workers"],
@@ -72,7 +82,7 @@ def main() -> int:
                 "latest_checkpoint": str(config["output_dir"] / "expert5_latest.pt"),
                 "best_checkpoint": str(config["output_dir"] / "expert5_best.pt"),
                 "final_checkpoint": str(config["output_dir"] / "expert5_final.pt"),
-                "final_checkpoint_role": "best holdout-MSE model; latest is the resumable last epoch",
+                "final_checkpoint_role": "best official-validation-MSE model; latest is the resumable last epoch",
                 "history": history,
             },
             indent=2,

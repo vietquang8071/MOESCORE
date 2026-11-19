@@ -296,7 +296,7 @@ class SetAResidualAdapterTests(unittest.TestCase):
 
 
 class SetACachedDatasetTests(unittest.TestCase):
-    def test_uses_verified_full9_store_order_and_hides_nontrain_labels(self):
+    def test_uses_verified_full9_store_order_and_exposes_labeled_validation_targets(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             make_full9_store(root, split="train")
@@ -317,10 +317,42 @@ class SetACachedDatasetTests(unittest.TestCase):
                 offset += width
             self.assertEqual(tuple(train.component_model_identities), SET_A_COMPONENT_ORDER)
             self.assertAlmostEqual(float(item["target_normalized"]), 0.0)
+
+            make_full9_store(root, split="validation", label_values=[5.0, 8.0])
+            validation = SetACachedDataset(root, split="validation", require_labels=True)
+            validation_item = validation[1]
+            self.assertAlmostEqual(float(validation_item["label_raw"]), 8.0)
+            self.assertAlmostEqual(float(validation_item["target_normalized"]), 0.6)
+
+            unlabeled_validation_root = Path(temporary) / "unlabeled_validation"
+            make_full9_store(unlabeled_validation_root, split="validation", labels=False)
+            unlabeled_validation = SetACachedDataset(
+                unlabeled_validation_root, split="validation", require_labels=False
+            )
+            self.assertNotIn("label_raw", unlabeled_validation[0])
+            self.assertNotIn("target_normalized", unlabeled_validation[0])
+            with self.assertRaisesRegex(ValueError, "labels"):
+                SetACachedDataset(
+                    unlabeled_validation_root, split="validation", require_labels=True
+                )
+
             make_full9_store(root, split="test", labels=False)
             test = SetACachedDataset(root, split="test")
             self.assertNotIn("label_raw", test[0])
             self.assertNotIn("target_normalized", test[0])
+
+    def test_labeled_validation_checks_source_manifest_raw_label(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            make_full9_store(
+                root,
+                split="validation",
+                label_values=[5.0, 8.0],
+                stored_label_values=[5.0, 9.0],
+            )
+            validation = SetACachedDataset(root, split="validation", require_labels=True)
+            with self.assertRaisesRegex(ValueError, "differs from the source manifest"):
+                validation[1]
 
     def test_rejects_old_or_missing_feature_representation_provenance(self):
         bad_representation = dict(REPRESENTATION)

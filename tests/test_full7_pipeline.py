@@ -82,14 +82,26 @@ def test_build_full7_from_trusted_synthetic_heads(tmp_path):
 
     full9, whisper, audio = _sources(tmp_path)
     e5_data = SetACachedDataset(full9, split="train")
+    _, _, validation_audio = _sources(tmp_path, split="validation")
+    e5_validation = SetACachedDataset(full9, split="validation", require_labels=True)
     e6_data = SetBCachedDataset(full9, whisper, split="train", source_audio_dir=audio)
     e5 = SetAResidualAdapter()
     e6 = SetBResidualAdapter()
     e5_path, e6_path = tmp_path / "e5.pt", tmp_path / "e6.pt"
-    torch.save({"format_version": 2, "feature_contract": e5_contract(),
+    e5_metrics = {"epoch": 1.0, "train_mse": 0.3, "validation_mse": 0.2,
+                  "best_validation_mse": 0.2, "learning_rate": 0.001}
+    torch.save({"format_version": 3, "feature_contract": e5_contract(),
                 "architecture_config": e5.head.architecture_config,
                 "score_normalization": E5_NORMALIZATION,
-                "training_state": {"holdout_split": {"strategy": "synthetic"}},
+                "epoch": 1, "global_step": 1, "data_provenance": e5_data.provenance,
+                "training_state": {"selection_policy": "official_validation_mse_v1",
+                                    "train_provenance": e5_data.provenance,
+                                    "validation_provenance": e5_validation.provenance,
+                                    "train_sample_ids": e5_data.sample_ids,
+                                    "validation_sample_ids": e5_validation.sample_ids,
+                                    "best_validation_mse": 0.2, "best_epoch": 1,
+                                    "epoch": 1, "global_step": 1,
+                                    "metric_history": [e5_metrics]},
                 "component_model_identities": e5_data.component_model_identities,
                 "component_cache_identities": {name: e5_data.component_cache_identities[name]["cache_id"]
                                                 for name in SET_A_COMPONENT_ORDER},
@@ -122,7 +134,7 @@ def test_build_full7_from_trusted_synthetic_heads(tmp_path):
     assert again["store_identity_sha256"] == report["store_identity_sha256"]
 
     for split in ("validation", "test"):
-        _, _, split_audio = _sources(tmp_path, split=split)
+        split_audio = validation_audio if split == "validation" else _sources(tmp_path, split=split)[2]
         built = build_full7_split(full9, whisper, e5_path, e6_path, tmp_path / "full7",
                                   split=split, source_audio_dir=split_audio)
         assert built["sample_count"] == 2
@@ -208,6 +220,64 @@ def test_build_full7_from_trusted_synthetic_heads(tmp_path):
         stream.write(b"corrupt")
     with pytest.raises(ValueError, match="hash mismatch"):
         validate_feature_store(tmp_path / "full7", split="test")
+
+
+def test_full7_membership_tracks_official_validation_and_legacy_holdout(tmp_path):
+    from data.full7_assembler import _head_membership
+
+    full9, _, _ = _sources(tmp_path, split="train")
+    train = SetACachedDataset(full9, split="train")
+    _sources(tmp_path, split="validation")
+    validation = SetACachedDataset(full9, split="validation", require_labels=True)
+    _sources(tmp_path, split="test")
+    test = SetACachedDataset(full9, split="test")
+    train_hash = train.provenance["source_manifest_sha256"]
+    validation_hash = validation.provenance["source_manifest_sha256"]
+    e6_payload = {"dataset_provenance": {"train": {
+        "full9_source_manifest_sha256": train_hash,
+    }}}
+    new_e5 = {
+        "data_provenance": train.provenance,
+        "training_state": {
+            "selection_policy": "official_validation_mse_v1",
+            "train_provenance": train.provenance,
+            "validation_provenance": validation.provenance,
+            "train_sample_ids": train.sample_ids,
+            "validation_sample_ids": validation.sample_ids,
+        },
+    }
+    train_membership = _head_membership(
+        "train", train.sample_ids, train_hash, new_e5, e6_payload, synthetic=False
+    )
+    validation_membership = _head_membership(
+        "validation", validation.sample_ids, validation_hash, new_e5,
+        {"dataset_provenance": {"train": {"full9_source_manifest_sha256": train_hash}}},
+        synthetic=False,
+    )
+    test_membership = _head_membership(
+        "test", test.sample_ids, test.provenance["source_manifest_sha256"], new_e5,
+        {"dataset_provenance": {"train": {"full9_source_manifest_sha256": train_hash}}},
+        synthetic=False,
+    )
+    assert train_membership["expert5"]["per_row"] == ["IN_SAMPLE_FIT"] * len(train)
+    assert validation_membership["expert5"]["per_row"] == [
+        "OUT_OF_SAMPLE_FIT_VALIDATION_SELECTED"
+    ] * len(validation)
+    assert test_membership["expert5"]["per_row"] == ["OUT_OF_SAMPLE"] * len(test)
+
+    legacy_e5 = {
+        "data_provenance": train.provenance,
+        "training_state": {
+            "fit_sample_ids": train.sample_ids[:1],
+            "holdout_sample_ids": train.sample_ids[1:],
+        },
+    }
+    legacy = _head_membership(
+        "train", train.sample_ids, train_hash, legacy_e5, e6_payload, synthetic=False
+    )
+    assert legacy["expert5"]["per_row"] == [
+        "IN_SAMPLE_FIT", "OUT_OF_SAMPLE_FIT_SELECTION_HOLDOUT"
+    ]
 
 
 def test_builder_cli_rejects_cross_split_duplicate_wav(tmp_path, capsys):

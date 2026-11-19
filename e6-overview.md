@@ -229,7 +229,7 @@ Each checkpoint must record the E6 feature/architecture contract (`[B,4609]`), s
 
 Resume must restore E6 model, optimizer, progress, seed, best metric/epoch and the provenance/identity of the sibling `best` checkpoint; it must reject changed training hyperparameters, an incompatible E6 architecture, altered train or validation dataset/cache identities, or a changed checkpoint-selection metric. `epochs=30` is the total target; resuming after epoch 12 performs epochs 13–30. Do not overwrite the best checkpoint based on a different validation dataset or a different Whisper batch-padding policy. Preserve deterministic ordering/seeds where practical and document any hardware-level nondeterminism.
 
-**Unlike E5:** E5's current `expert5_final.pt` is a copy of *best-on-internal-holdout*. For **E6 v2**, `expert6_final.pt` is intentionally **epoch 30**, and `expert6_best.pt` is **best-on-official-validation**. Do not reuse the E5 trainer unchanged or conflate the meanings.
+**Unlike E5:** E5 V3 trains on all official train rows and selects `expert5_best.pt`/`expert5_final.pt` by official validation MSE. Legacy E5 V2 checkpoints may still reflect internal-holdout selection. For **E6 v2**, `expert6_final.pt` is intentionally **epoch 30**, and `expert6_best.pt` is **best-on-official-validation**. Do not reuse the E5 trainer unchanged or conflate the checkpoint roles.
 
 ### 5.5 Competition-rule interpretation and validation-selection caveat
 

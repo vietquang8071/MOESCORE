@@ -26,14 +26,19 @@ Scale and bias initialize to 1 and 0. The final residual layer is zero-initializ
 The preferred API is:
 
 ```python
-dataset = SetACachedDataset(full9_root, split="train")
+train_dataset = SetACachedDataset(
+    full9_root, split="train", require_labels=True
+)
+validation_dataset = SetACachedDataset(
+    full9_root, split="validation", require_labels=True
+)
 ```
 
 The dataset reads the M2D, MS-CLAP, and MGA score/feature slices from a single verified Full9 store. It validates store and source-manifest hashes, split and ordered sample IDs, WAV identities, component checkpoint/cache identities, preprocessing identity, feature representation and dimensions, finite values, and labels. It rejects obsolete 5D representations or an MGA contract other than the Full9 32 kHz input above. Standalone precomputed E5 caches remain supported as an optional generic path, but are not required for Full9 training or inference.
 
-Raw labels are checked after conversion to the cache's float32 representation, with numeric, finite, and `[0,10]` validation. Training uses only the official `train` split and target `(target_raw - 5.0) / 5.0`; test labels are not loaded.
+Raw labels are checked against the source manifest after conversion to the cache's float32 representation, with numeric, finite, and `[0,10]` validation. Labeled official train and validation rows expose `label_raw` and `target_normalized = (target_raw - 5.0) / 5.0`; test labels remain hidden.
 
-The official Full9 extraction manifest inspected here contains sample IDs and waveform identities but no group ID or model ID. The holdout splitter therefore uses a deterministic SHA256 ordering of train sample IDs by default. If a complete `group_id` field is present, it hashes and assigns whole groups instead. Partial or malformed group metadata is rejected. Both subsets must be non-empty, and their IDs and a canonical split fingerprint are stored in checkpoints.
+E5 fits on 100% of the official train split and evaluates on 100% of official validation. There is no internal train/holdout split. Validation runs after every epoch in evaluation mode under `torch.inference_mode()` and never participates in backward or optimizer updates.
 
 ## Preprocessing and source fidelity
 
@@ -51,7 +56,7 @@ export MOESCORE_E5_OUTPUT=/path/to/e5_runs
 python scripts/train_set_a_residual.py --config configs/set_a_residual.example.yaml
 ```
 
-Defaults are 15% train-only holdout, five epochs of patience, and `min_delta=0`. Fit and holdout membership is deterministic. The trainer evaluates fit and holdout MSE separately after each epoch, writes the resumable last state to `expert5_latest.pt`, and selects `expert5_best.pt` by the lowest holdout MSE. `expert5_final.pt` is a copy of the best checkpoint, not the last epoch. Set patience to `null` to disable early stopping.
+The selection metric is `official_validation_mse`. The trainer records `train_mse`, `validation_mse`, `best_validation_mse`, epoch, and learning rate after each epoch. Strict improvement by more than `min_delta` selects `expert5_best.pt`; early stopping uses the same validation MSE and preserves the existing patience behavior. `expert5_latest.pt` is the resumable last epoch, and `expert5_final.pt` copies the best official-validation checkpoint. Patience defaults to five epochs; set it to `null` to disable early stopping.
 
 Resume in the same output directory with the latest checkpoint:
 
@@ -61,7 +66,7 @@ python scripts/train_set_a_residual.py \
   --resume "$MOESCORE_E5_OUTPUT/expert5_latest.pt"
 ```
 
-Resume restores optimizer, epoch, global step, seed, best score/epoch, patience progress, and split membership. It checks the split/config fingerprint, data/store provenance, and the sibling best-checkpoint hash. Training hyperparameters and batch size must match; `epochs` is the requested total and can be extended.
+Resume restores optimizer, epoch, global step, seed, best validation score/epoch, patience progress, metric history, and both split memberships. It verifies official train and validation provenance, selection policy, training configuration, and the sibling best-checkpoint hash. Training hyperparameters and batch size must match; `epochs` is the requested total and can be extended. Legacy format V2 holdout checkpoints remain loadable for inference and legacy Full7 membership checks, but cannot be resumed under the new policy.
 
 Run inference on a verified Full9 validation or test split (runtime device accepts `auto`, `cpu`, or `cuda`):
 
@@ -73,7 +78,7 @@ python scripts/infer_set_a_residual.py \
   --output "$MOESCORE_E5_OUTPUT/test_scores.csv"
 ```
 
-Both `best` and `final` are suitable for inference; prefer `best` for downstream evaluation and Full7 integration. Checkpoints contain the head, optimizer snapshot, architecture and feature contracts, score normalization, epoch/step, component model/cache identities, data provenance, seed, holdout split and metrics. They do not contain CLAP backbone tensors.
+Both `best` and `final` are suitable for inference; prefer `best` for downstream evaluation and Full7 integration. Format V3 checkpoints contain the head, optimizer snapshot, architecture and feature contracts, score normalization, epoch/step, component model/cache identities, official train and validation provenance, exact sample membership, selection policy, and metrics. They do not contain CLAP backbone tensors or fabricate legacy holdout fields.
 
 ## Full7 integration contract
 
@@ -90,8 +95,8 @@ batch = {
 score5, features5 = expert5(batch)
 ```
 
-Each score is float32 `[B,1]`; feature shapes are `[B,3073]`, `[B,4097]`, `[B,4097]`. All tensors share batch size and device. E5 returns float32 score `[B,1]` and the full ordered concatenation `[B,11267]`. Full7 needs to construct the adapter, feed this component schema, and add the output to its internal expert/feature assembly at the agreed E5 position and width. This change intentionally does not register E5 globally or change the Global Gating Network.
+Each score is float32 `[B,1]`; feature shapes are `[B,3073]`, `[B,4097]`, `[B,4097]`. All tensors share batch size and device. E5 returns float32 score `[B,1]` and the full ordered concatenation `[B,11267]`. Full7 verifies the checkpoint's official train/validation source identity and exact membership, then records train rows as `IN_SAMPLE_FIT`, validation rows as `OUT_OF_SAMPLE_FIT_VALIDATION_SELECTED`, and test rows as `OUT_OF_SAMPLE`. Legacy V2 checkpoints retain their internal holdout membership classification.
 
 ## Verification status
 
-CPU synthetic Full9 stores exercise direct component reuse, MGA's 32 kHz contract, label conversion, cache provenance, output dimensions, train-only split, early stopping, best/final selection, resume checks, `device: auto`, and checkpoint inference. An actual Full9 cache was not found in the local environment, so no real-cache smoke test or full training was run. The exact test commands and results are recorded in `MOE27-E5-report.md`.
+CPU synthetic Full9 stores exercise direct component reuse, MGA's 32 kHz contract, label conversion and source-manifest checks for validation, cache provenance, output dimensions, full-train optimization, no-gradient validation, early stopping, validation-best/final selection, resume checks, `device: auto`, checkpoint inference, and Full7 membership. The local environment has no official Full9 data, so no real-cache smoke test or full-size training was run. The exact test commands and results are recorded in `MOE27-E5-report.md`.

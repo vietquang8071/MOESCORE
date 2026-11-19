@@ -77,6 +77,7 @@ FULL9_CHECKPOINT_FIELDS = {**CHECKPOINT_FIELDS,
     "top2_laion": ("checkpoint",),
     "top2_mga": ("pretrained_checkpoint",),
     "m2d_lora": ("base_checkpoint", "finetuned_checkpoint"),
+    "expert8": ("base_checkpoint", "finetuned_checkpoint"),
 }
 
 
@@ -117,6 +118,7 @@ _ADAPTER_SOURCE_FILES = {
     "top2_laion": "model/expert_adapters/top2_laion_adapter.py",
     "top2_mga": "model/expert_adapters/top2_mga_adapter.py",
     "m2d_lora": "model/expert_adapters/m2d_lora_adapter.py",
+    "expert8": "model/expert_adapters/expert8_m2d_clap_adapter.py",
 }
 _PREPROCESS_METHODS = {
     "expert1": "_expert1_audio",
@@ -128,6 +130,7 @@ _PREPROCESS_METHODS = {
     "top2_laion": "_expert1_audio",
     "top2_mga": "_expert2_audio",
     "m2d_lora": "_expert3_audio",
+    "expert8": "_expert8_audio",
 }
 _TEXT_RESOURCE_IDS = {
     "expert1": ("roberta-base",),
@@ -140,6 +143,7 @@ _TEXT_RESOURCE_IDS = {
     "top2_mga": ("bert-base-uncased",),
     # PortableM2D's BertXEncoder defaults to this exact Hub ID.
     "m2d_lora": ("google-bert/bert-base-uncased",),
+    "expert8": ("google-bert/bert-base-uncased",),
 }
 _DEPENDENCIES = {
     "expert1": ("torch", "numpy", "laion-clap", "transformers", "torchaudio", "torchlibrosa"),
@@ -151,6 +155,7 @@ _DEPENDENCIES = {
     "top2_laion": ("torch", "numpy", "transformers", "laion-clap", "torchaudio"),
     "top2_mga": ("torch", "numpy", "scipy", "transformers", "timm", "sentence-transformers", "PyYAML"),
     "m2d_lora": ("torch", "numpy", "scipy", "soundfile", "torchaudio", "transformers", "timm", "einops", "nnAudio"),
+    "expert8": ("torch", "numpy", "scipy", "soundfile", "torchaudio", "transformers", "timm", "einops", "nnAudio"),
 }
 
 
@@ -270,7 +275,7 @@ def compute_expert_cache_identity(expert, config, *, contract=None, feature_dim=
             PROJECT_ROOT / "model/expert_adapters/paired_cross_features.py"
         )
     extra_implementation = {}
-    if expert.startswith("top2_") or expert == "m2d_lora":
+    if expert.startswith("top2_") or expert in {"m2d_lora", "expert8"}:
         implementation_files.add(PROJECT_ROOT / "model/expert_adapters/top2_common.py")
     # The selected dataset method, serialized input contract and WAV resolver
     # cover effective dispatch without hashing unrelated expert branches.
@@ -298,7 +303,7 @@ def compute_expert_cache_identity(expert, config, *, contract=None, feature_dim=
         implementation_files.update(
             _source_files_under(PROJECT_ROOT / "expert3_finetune/XACLE_2027_baselinemodel")
         )
-    if expert in {"top2_m2d", "m2d_lora"}:
+    if expert in {"top2_m2d", "m2d_lora", "expert8"}:
         implementation_files.update(
             _source_files_under(PROJECT_ROOT / "expert3_finetune/XACLE_2027_baselinemodel")
         )
@@ -306,6 +311,11 @@ def compute_expert_cache_identity(expert, config, *, contract=None, feature_dim=
         implementation_files.add(
             PROJECT_ROOT / "model/expert_adapters/m2d_lora_runtime.py"
         )
+    if expert == "expert8":
+        implementation_files.update({
+            PROJECT_ROOT / "model/expert_adapters/expert8_m2d_clap_runtime.py",
+            PROJECT_ROOT / "model/expert_adapters/m2d_lora_runtime.py",
+        })
     if expert == "top2_mga" and not section.get("source_dir"):
         implementation_files.update(
             _source_files_under(PROJECT_ROOT / "expert2_finetune/MGA-CLAP")

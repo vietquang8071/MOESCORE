@@ -16,17 +16,19 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from data.full7_score_contract import audit_train_scores
+from data.full8_contract import audit_train_scores_full8
 from data.moe_feature_store import MoeFeatureStoreDataset, _canonical_json
 
 
 def audit_store(root: str | Path) -> dict:
     dataset = MoeFeatureStoreDataset(root, split="train", require_labels=True)
-    if dataset.manifest.get("expert_profile") != "full_7":
-        raise ValueError("score audit requires a verified full_7 train store")
+    profile = dataset.manifest.get("expert_profile")
+    if profile not in {"full_7", "full_8"}:
+        raise ValueError("score audit requires a verified full_7 or full_8 train store")
     scores = np.stack([dataset[index]["scores"].numpy() for index in range(len(dataset))])
     labels = np.asarray([dataset[index]["label_raw"].item() for index in range(len(dataset))], np.float32)
     contracts = dataset.manifest["score_contracts"]
-    diagnostics = audit_train_scores(scores, labels)
+    diagnostics = audit_train_scores_full8(scores, labels) if profile == "full_8" else audit_train_scores(scores, labels)
     return {"split": "train", "store_identity_sha256": dataset.identity,
             "score_contracts": contracts, "diagnostics": diagnostics,
             "score_contract_sha256": hashlib.sha256(_canonical_json(contracts)).hexdigest(),

@@ -62,8 +62,11 @@ FULL7_FEATURE_DIMS = MappingProxyType({
     "expert7": 3073,
 })
 FULL7_FEATURE_WIDTH = sum(FULL7_FEATURE_DIMS.values())
+FULL8_EXPERT_ORDER = (*FULL7_EXPERT_ORDER, "expert8")
+FULL8_FEATURE_DIMS = MappingProxyType({**dict(FULL7_FEATURE_DIMS), "expert8": 3073})
+FULL8_FEATURE_WIDTH = sum(FULL8_FEATURE_DIMS.values())
 EXPERT_PROFILES = MappingProxyType({"top1_4": EXPERT_ORDER, "full_9": FULL9_EXPERT_ORDER,
-                                    "full_7": FULL7_EXPERT_ORDER})
+                                    "full_7": FULL7_EXPERT_ORDER, "full_8": FULL8_EXPERT_ORDER})
 
 
 def profile_contract(profile: str = "top1_4") -> tuple[tuple[str, ...], dict[str, int], int]:
@@ -76,8 +79,11 @@ def profile_contract(profile: str = "top1_4") -> tuple[tuple[str, ...], dict[str
                 or FULL7_FEATURE_DIMS["expert6"] != SET_B_FEATURE_DIM
                 or FULL7_FEATURE_WIDTH != 29959):
             raise RuntimeError("Full7 E5/E6 feature contracts differ from the frozen registry")
+    if profile == "full_8" and (FULL8_FEATURE_WIDTH != 33032 or FULL8_EXPERT_ORDER[:-1] != FULL7_EXPERT_ORDER):
+        raise RuntimeError("Full8 feature contract differs from the frozen E1-E7 plus E8 registry")
     order = EXPERT_PROFILES[profile]
-    source = FULL7_FEATURE_DIMS if profile == "full_7" else EXPERT_FEATURE_DIMS_FULL9
+    source = (FULL7_FEATURE_DIMS if profile == "full_7" else
+              FULL8_FEATURE_DIMS if profile == "full_8" else EXPERT_FEATURE_DIMS_FULL9)
     dimensions = {name: source[name] for name in order}
     return order, dimensions, sum(dimensions.values())
 
@@ -150,6 +156,7 @@ TOP2_EXPERT_INPUT_CONTRACTS = MappingProxyType(
         "top2_m2d": EXPERT_INPUT_CONTRACTS["expert3"],
         "top2_mga": EXPERT_INPUT_CONTRACTS["expert2"],
         "m2d_lora": EXPERT_INPUT_CONTRACTS["expert3"],
+        "expert8": EXPERT_INPUT_CONTRACTS["expert3"],
     }
 )
 ALL_EXPERT_INPUT_CONTRACTS = MappingProxyType({**EXPERT_INPUT_CONTRACTS, **TOP2_EXPERT_INPUT_CONTRACTS})
@@ -181,6 +188,9 @@ EXPERT_REGISTRY = MappingProxyType(
         "top2_laion": ExpertRegistration("model.expert_adapters.top2_laion_adapter", "Top2LAIONAdapter", 2049),
         "top2_mga": ExpertRegistration("model.expert_adapters.top2_mga_adapter", "Top2MGAAdapter", 4097),
         "m2d_lora": ExpertRegistration("model.expert_adapters.m2d_lora_adapter", "M2DLoRAAdapter", 3073),
+        "expert8": ExpertRegistration(
+            "model.expert_adapters.expert8_m2d_clap_adapter", "Expert8M2DCLAPAdapter", 3073
+        ),
     }
 )
 

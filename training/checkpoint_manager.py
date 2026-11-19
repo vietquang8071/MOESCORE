@@ -24,9 +24,13 @@ CHECKPOINT_FORMAT_VERSION = 1
 FULL9_CHECKPOINT_FORMAT_VERSION = 2
 LEGACY_FULL7_CHECKPOINT_FORMAT_VERSION = 3
 FULL7_CHECKPOINT_FORMAT_VERSION = 4
+FULL8_CHECKPOINT_FORMAT_VERSION = 5
 FULL7_GATE_ARCHITECTURE = {"input_width": 29959, "hidden_width": 512,
                            "normalization": "LayerNorm", "activation": "ReLU",
                            "dropout": 0.1, "output_width": 7, "output": "Softmax(dim=-1)"}
+FULL8_GATE_ARCHITECTURE = {"input_width": 33032, "hidden_width": 512,
+                           "normalization": "LayerNorm", "activation": "ReLU",
+                           "dropout": 0.1, "output_width": 8, "output": "Softmax(dim=-1)"}
 _FULL7_SOURCE_FILES = (
     "model/moe_gating_core.py", "training/moe_trainer.py", "training/moe_evaluator.py",
     "training/target_transform.py", "training/checkpoint_manager.py",
@@ -38,6 +42,18 @@ _FULL7_SOURCE_FILES = (
     "training/set_b_config.py", "scripts/train_set_b_residual.py",
     "scripts/build_full7_feature_store.py",
 )
+_FULL8_SOURCE_FILES = tuple(dict.fromkeys((
+    *_FULL7_SOURCE_FILES,
+    "data/full8_assembler.py", "data/full8_contract.py",
+    "model/expert_adapters/expert8_m2d_clap_adapter.py",
+    "model/expert_adapters/expert8_m2d_clap_runtime.py",
+    "model/expert_adapters/m2d_lora_runtime.py", "data/unified_dataset.py",
+    "data/moe_expert_cache.py", "scripts/extract_moe_feature_store.py",
+    "expert3_finetune/XACLE_2027_baselinemodel/models/moescore_expert3.py",
+    "expert3_finetune/XACLE_2027_baselinemodel/models/m2d/vendor/portable_m2d.py",
+    "scripts/extract_expert8_features.py", "scripts/build_full8_feature_store.py",
+    "training/full8_resume_policy.py",
+)))
 _LEGACY_FULL7_SOURCE_CODE_SHA256 = {
     "model/moe_gating_core.py": "fbc4038ff4579686144de476f81c22b17d431a083208282aa8168617dd77ee6d",
     "training/moe_trainer.py": "13f1c3f8b809ef2fb57aa7e4dff6228e58bbde65388f6d55802909452fecec6c",
@@ -54,6 +70,31 @@ _LEGACY_FULL7_SOURCE_CODE_SHA256 = {
     "scripts/infer_moe_gating.py": "a57d0e5b46fda6c7f76a5ab565080e6e01b6b533ef32d5ba892809a8402edfa4",
     "scripts/audit_full7_scores.py": "7e188f1ea90dfaade180d545d688d8865732489392d5f00c526f308c1b98a53a",
 }
+# Exact executable source identity at the branch base immediately before Full8.
+# Historical format-4 Full7 checkpoints remain usable only when their complete
+# recorded map matches this allowlisted source revision or the current code.
+_FULL7_BRANCH_BASE_SOURCE_CODE_SHA256 = {
+    "model/moe_gating_core.py": "fbc4038ff4579686144de476f81c22b17d431a083208282aa8168617dd77ee6d",
+    "training/moe_trainer.py": "13f1c3f8b809ef2fb57aa7e4dff6228e58bbde65388f6d55802909452fecec6c",
+    "training/moe_evaluator.py": "26f2de25aaed5ba1df541b573b3257d4384672f0bbfdb108e5a94c7a0fd5f213",
+    "training/target_transform.py": "255fc3ab19383ce4e03ac44317398d178ef51ef8a43daea0f66882cd4d8ba2f7",
+    "training/checkpoint_manager.py": "e09054cf028647265a01f81c0e0582037f6df36b964ab1dd86260a9f3f75f538",
+    "loss/loss_function.py": "1e162ed389dee0801c71c97a249c2c848a9fcde3690015526da21003dac9ff56",
+    "data/full7_assembler.py": "e89e6da0955e895895942f8e1d468397cbdabd8fb123b826c1d249d1db4700fa",
+    "data/full7_score_contract.py": "554f01d382a62b5247651f3f4edce8a9ab80b7a5025748348a131846b49bfba2",
+    "data/moe_feature_store.py": "b8eee3bc903a3a4f283fe30784327c359f9a22f5e5c4a4c7b8aa64e7c58da6c7",
+    "model/expert_adapters/registry.py": "d1c4f350b9669dd4ebc88b6dafc208a9e85f815a7f06a9b1f9f159252f1a0def",
+    "scripts/train_moe_gating.py": "4b685438b7576f899b5530a4db23e56a68d2cc8cb972c65c1a9dace9d69b0ec1",
+    "scripts/evaluate_moe_gating.py": "19a552f0a7b7c1158a7ec308d53f4d33192cb4ab55f3277f3ced20a7033cbe08",
+    "scripts/infer_moe_gating.py": "a57d0e5b46fda6c7f76a5ab565080e6e01b6b533ef32d5ba892809a8402edfa4",
+    "scripts/audit_full7_scores.py": "7e188f1ea90dfaade180d545d688d8865732489392d5f00c526f308c1b98a53a",
+    "data/audio_overlap.py": "207a560b11826813ce4336d14c881224f72cc990de977514b010bde35027069f",
+    "training/config.py": "2bf2b3572dd43bb436198d17087419b4bac995778e9771d7d93599b79505c05a",
+    "training/set_b_trainer.py": "f1cdd5c5d7cc488fa0ea7e6d8987981a32d638bdd418b32dae6b1dc38ac5d48f",
+    "training/set_b_config.py": "090793544788aeed59f99f665ca6b04e27a5e24a324bbfc4b838cf4de941e9fe",
+    "scripts/train_set_b_residual.py": "dfed51d0166f68342e9d9cf4d53c3718e19cb531b62cbf3cca440c0890b2b4fe",
+    "scripts/build_full7_feature_store.py": "1b74c89256ec93e77258faef7d628c8ba0e0b73b6d9f63058f4fc77309dafe24",
+}
 
 
 def full7_source_code_sha256() -> dict[str, str]:
@@ -62,10 +103,17 @@ def full7_source_code_sha256() -> dict[str, str]:
             for name in _FULL7_SOURCE_FILES}
 
 
+def full8_source_code_sha256() -> dict[str, str]:
+    root = Path(__file__).parents[1]
+    return {name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+            for name in _FULL8_SOURCE_FILES}
+
+
 def _validate_gate_payload(payload: Mapping[str, Any], gate: GatingNetwork) -> None:
     version = payload.get("format_version")
     if version not in {CHECKPOINT_FORMAT_VERSION, FULL9_CHECKPOINT_FORMAT_VERSION,
-                       LEGACY_FULL7_CHECKPOINT_FORMAT_VERSION, FULL7_CHECKPOINT_FORMAT_VERSION}:
+                       LEGACY_FULL7_CHECKPOINT_FORMAT_VERSION, FULL7_CHECKPOINT_FORMAT_VERSION,
+                       FULL8_CHECKPOINT_FORMAT_VERSION}:
         raise ValueError("unsupported gating checkpoint schema")
     profile = "top1_4" if version == CHECKPOINT_FORMAT_VERSION else payload.get("expert_profile")
     order, dimensions, width = profile_contract(profile)
@@ -94,11 +142,26 @@ def _validate_gate_payload(payload: Mapping[str, Any], gate: GatingNetwork) -> N
         or set(payload["feature_store_identity"]["source_wav_sha256_by_split"]) != {"train", "validation"}
     ):
         raise ValueError("checkpoint full_7 architecture, source code, order, or provenance are incompatible")
+    if version == FULL8_CHECKPOINT_FORMAT_VERSION and (
+        profile != "full_8" or payload.get("expert_order") != list(order)
+        or payload.get("expert_feature_dimensions") != dimensions
+        or payload.get("gate_architecture") != FULL8_GATE_ARCHITECTURE
+        or payload.get("selection_policy") != "official_validation_srcc_strict_v1_provisional"
+        or not isinstance(payload.get("expert_checkpoint_provenance"), Mapping)
+        or set(payload["expert_checkpoint_provenance"]) != set(order)
+        or not isinstance(payload.get("feature_store_identity"), Mapping)
+        or not all(payload["feature_store_identity"].get(key) for key in
+                   ("train", "validation", "preprocessing_contract"))
+        or not isinstance(payload["feature_store_identity"].get("source_wav_sha256_by_split"), Mapping)
+        or set(payload["feature_store_identity"]["source_wav_sha256_by_split"]) != {"train", "validation"}
+    ):
+        raise ValueError("checkpoint full_8 architecture, source, order, or provenance are incompatible")
     if version == LEGACY_FULL7_CHECKPOINT_FORMAT_VERSION:
         if payload.get("source_code_sha256") != _LEGACY_FULL7_SOURCE_CODE_SHA256:
             raise ValueError("legacy Full7 checkpoint source code identity is incompatible")
     if version == FULL7_CHECKPOINT_FORMAT_VERSION:
-        if payload.get("source_code_sha256") != full7_source_code_sha256():
+        if (payload.get("source_code_sha256") != full7_source_code_sha256()
+                and payload.get("source_code_sha256") != _FULL7_BRANCH_BASE_SOURCE_CODE_SHA256):
             raise ValueError("checkpoint full_7 source code identity is incompatible")
         identity = payload.get("feature_store_identity")
         config = payload.get("config")
@@ -112,6 +175,23 @@ def _validate_gate_payload(payload: Mapping[str, Any], gate: GatingNetwork) -> N
                 or data_config["allow_train_validation_audio_overlap"]
                 != diagnostic["allow_train_validation_audio_overlap"]):
             raise ValueError("checkpoint Full7 overlap policy differs from its run configuration")
+        _validate_full7_review_identity(identity, config)
+    if version == FULL8_CHECKPOINT_FORMAT_VERSION:
+        if payload.get("source_code_sha256") != full8_source_code_sha256():
+            raise ValueError("checkpoint full_8 source code identity is incompatible")
+        identity = payload.get("feature_store_identity")
+        config = payload.get("config")
+        data_config = config.get("data") if isinstance(config, Mapping) else None
+        try:
+            diagnostic = _validate_full7_overlap_identity(identity)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(f"checkpoint Full8 audio-overlap diagnostic is invalid: {exc}") from exc
+        if (not isinstance(data_config, Mapping)
+                or data_config.get("profile") != "full_8"
+                or type(data_config.get("allow_train_validation_audio_overlap")) is not bool
+                or data_config["allow_train_validation_audio_overlap"]
+                != diagnostic["allow_train_validation_audio_overlap"]):
+            raise ValueError("checkpoint Full8 overlap policy differs from its run configuration")
         _validate_full7_review_identity(identity, config)
 
 
@@ -229,7 +309,7 @@ class MoeCheckpointManager:
         provenance_body = json.loads(_canonical(dict(expert_checkpoint_provenance), "expert_checkpoint_provenance").decode("utf-8"))
         if not identity_body or not provenance_body:
             raise ValueError("feature-store identity and expert checkpoint provenance are required")
-        if gating_network.profile in {"full_9", "full_7"} and (
+        if gating_network.profile in {"full_9", "full_7", "full_8"} and (
             set(provenance_body) != set(order)
             or not all(identity_body.get(key) for key in ("train", "validation", "preprocessing_contract"))
         ):
@@ -245,6 +325,15 @@ class MoeCheckpointManager:
             if type(allow_overlap) is not bool or allow_overlap != diagnostic["allow_train_validation_audio_overlap"]:
                 raise ValueError("full_7 checkpoint configuration and overlap diagnostic differ")
             _validate_full7_review_identity(identity_body, config_body)
+        if gating_network.profile == "full_8":
+            diagnostic = _validate_full7_overlap_identity(identity_body)
+            data_config = config_body.get("data")
+            if (not isinstance(data_config, Mapping) or data_config.get("profile") != "full_8"
+                    or type(data_config.get("allow_train_validation_audio_overlap")) is not bool
+                    or data_config["allow_train_validation_audio_overlap"]
+                    != diagnostic["allow_train_validation_audio_overlap"]):
+                raise ValueError("full_8 checkpoint configuration and audio-overlap diagnostic differ")
+            _validate_full7_review_identity(identity_body, config_body)
         if sampler_state is not None:
             sampler_body = json.loads(_canonical(dict(sampler_state), "sampler_state").decode("utf-8"))
         else:
@@ -253,7 +342,8 @@ class MoeCheckpointManager:
         payload = {
             "format_version": {"top1_4": CHECKPOINT_FORMAT_VERSION,
                                "full_9": FULL9_CHECKPOINT_FORMAT_VERSION,
-                               "full_7": FULL7_CHECKPOINT_FORMAT_VERSION}[gating_network.profile],
+                               "full_7": FULL7_CHECKPOINT_FORMAT_VERSION,
+                               "full_8": FULL8_CHECKPOINT_FORMAT_VERSION}[gating_network.profile],
             "gate_input_dim": gating_network.input_feature_dim,
             "gate_expert_count": gating_network.num_experts,
             "gating_state_dict": gate_state,
@@ -275,7 +365,7 @@ class MoeCheckpointManager:
             "cuda_rng_states": [state.cpu().clone() for state in torch.cuda.get_rng_state_all()]
             if torch.cuda.is_available() and torch.cuda.is_initialized() else [],
         }
-        if gating_network.profile in {"full_9", "full_7"}:
+        if gating_network.profile in {"full_9", "full_7", "full_8"}:
             payload.update({
                 "expert_profile": gating_network.profile,
                 "expert_order": list(order),
@@ -287,6 +377,10 @@ class MoeCheckpointManager:
             payload.update({"gate_architecture": FULL7_GATE_ARCHITECTURE,
                             "selection_policy": "official_validation_srcc_strict_v1_provisional",
                             "source_code_sha256": full7_source_code_sha256()})
+        if gating_network.profile == "full_8":
+            payload.update({"gate_architecture": FULL8_GATE_ARCHITECTURE,
+                            "selection_policy": "official_validation_srcc_strict_v1_provisional",
+                            "source_code_sha256": full8_source_code_sha256()})
         target = Path(path).expanduser().resolve()
         _atomic_torch_save(payload, target)
         return target
@@ -322,6 +416,11 @@ class MoeCheckpointManager:
             expected_policy = expected_feature_store_identity.get("score_review_policy")
             if actual_policy != expected_policy:
                 raise ValueError("gating checkpoint score review policy mismatch")
+        if payload.get("format_version") == FULL8_CHECKPOINT_FORMAT_VERSION:
+            actual_policy = payload["feature_store_identity"].get("score_review_policy")
+            expected_policy = expected_feature_store_identity.get("score_review_policy")
+            if actual_policy != expected_policy:
+                raise ValueError("Full8 gating checkpoint score review policy mismatch")
         expected_values = (
             ("config", dict(expected_config), "configuration"),
             ("feature_store_identity", dict(expected_feature_store_identity), "feature store identity"),
@@ -402,4 +501,6 @@ class MoeCheckpointManager:
         return payload
 
 
-__all__ = ["CHECKPOINT_FORMAT_VERSION", "FULL7_CHECKPOINT_FORMAT_VERSION", "MoeCheckpointManager"]
+__all__ = ["CHECKPOINT_FORMAT_VERSION", "FULL7_CHECKPOINT_FORMAT_VERSION",
+           "FULL8_CHECKPOINT_FORMAT_VERSION", "MoeCheckpointManager",
+           "full7_source_code_sha256", "full8_source_code_sha256"]

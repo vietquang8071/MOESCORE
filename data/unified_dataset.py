@@ -21,8 +21,10 @@ from torch.utils.data import Dataset
 
 
 SPLITS = ("train", "validation", "test")
-TARGET_SAMPLES = {"expert1": 480_000, "expert2": 320_000, "expert3": 160_000, "expert4": 160_000}
-TARGET_RATES = {"expert1": 48_000, "expert2": 32_000, "expert3": 16_000, "expert4": 16_000}
+TARGET_SAMPLES = {"expert1": 480_000, "expert2": 320_000, "expert3": 160_000, "expert4": 160_000,
+                  "expert8": 160_000}
+TARGET_RATES = {"expert1": 48_000, "expert2": 32_000, "expert3": 16_000, "expert4": 16_000,
+                "expert8": 16_000}
 _FILENAME_ALIASES = ("wav_file_name", "wave_file_name")
 _SCORE_ALIASES = (
     "average_score",
@@ -308,6 +310,26 @@ class UnifiedXACLEDataset(Dataset):
         if audio.size < TARGET_SAMPLES["expert3"]:
             audio = np.pad(audio, (0, TARGET_SAMPLES["expert3"] - audio.size))
         return torch.from_numpy(np.ascontiguousarray(audio, dtype=np.float32)).unsqueeze(0)
+
+    def _expert8_audio(self, path: Path) -> torch.Tensor:
+        """Apply E31's 16 kHz mono 10-second reader without sample-rate conversion."""
+        import soundfile as sf
+
+        audio, sample_rate = sf.read(path, dtype="float32", always_2d=True)
+        if int(sample_rate) != TARGET_RATES["expert8"]:
+            raise ValueError(
+                f"Expert8 source WAV must be {TARGET_RATES['expert8']} Hz; got {sample_rate} Hz ({path})"
+            )
+        if audio.size == 0:
+            raise ValueError(f"Expert8 source WAV is empty: {path}")
+        mono = audio.mean(axis=1, dtype=np.float32)
+        if not np.isfinite(mono).all():
+            raise ValueError(f"Expert8 source WAV contains non-finite samples: {path}")
+        target = TARGET_SAMPLES["expert8"]
+        mono = mono[:target]
+        if mono.size < target:
+            mono = np.pad(mono, (0, target - mono.size))
+        return torch.from_numpy(np.ascontiguousarray(mono, dtype=np.float32)).unsqueeze(0)
 
     def _expert4_audio(self, path: Path) -> tuple[torch.Tensor, int]:
         from scipy.io import wavfile

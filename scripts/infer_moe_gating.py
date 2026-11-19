@@ -37,10 +37,10 @@ def _device(value: str) -> torch.device:
 def _reject_test_wav_overlap(checkpoint_identity: dict, test_manifest: dict) -> None:
     saved = checkpoint_identity.get("source_wav_sha256_by_split")
     if not isinstance(saved, dict) or set(saved) != {"train", "validation"}:
-        raise ValueError("Full7 checkpoint lacks train/validation WAV fingerprint provenance")
+        raise ValueError("Full7/Full8 checkpoint lacks train/validation WAV fingerprint provenance")
     source_rows = test_manifest["assembly_identity"].get("ordered_source_fingerprints")
     if not isinstance(source_rows, list):
-        raise ValueError("Full7 test store lacks source WAV fingerprints")
+        raise ValueError("Full7/Full8 test store lacks source WAV fingerprints")
     earlier = {digest.lower() for split in ("train", "validation") for digest in saved[split]}
     overlap = earlier.intersection(row["wav_sha256"].lower() for row in source_rows)
     if overlap:
@@ -52,7 +52,7 @@ def infer_checkpoint(config: dict, checkpoint: str, output: str, *, device_overr
     dataset = MoeTrainingDataset(config["data"]["feature_store_root"], split="test", require_labels=False)
     profile = dataset.manifest.get("expert_profile", "top1_4")
     if config["data"].get("profile", profile) != profile:
-        raise ValueError("configured expert profile differs from test feature store")
+        raise ValueError(f"configured expert profile differs from {profile} test feature store")
     order, _, width = profile_contract(profile)
     gate = GatingNetwork(input_feature_dim=width, num_experts=len(order), profile=profile).to(device)
     payload = MoeCheckpointManager().load_for_inference(
@@ -64,12 +64,12 @@ def infer_checkpoint(config: dict, checkpoint: str, output: str, *, device_overr
     observed_contract = preprocessing_contract(dataset.manifest)
     if expected_contract != observed_contract:
         raise ValueError("test preprocessing contract differs from training checkpoint")
-    if profile == "full_7":
+    if profile in {"full_7", "full_8"}:
         _reject_test_wav_overlap(payload["feature_store_identity"], dataset.manifest)
     loader = DataLoader(dataset, batch_size=config["inference"]["batch_size"], shuffle=False, num_workers=0, collate_fn=collate_moe_features)
     rows = MoeGateEvaluator(gate).predict(loader)
     csv_path = write_submission_csv(rows, output,
-                                    filename_column="wave_file_name" if profile == "full_7" else "wav_file_name")
+                                    filename_column="wave_file_name" if profile in {"full_7", "full_8"} else "wav_file_name")
     return {
         "status": "PASS",
         "device": str(device),

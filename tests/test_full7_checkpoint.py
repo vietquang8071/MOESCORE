@@ -35,6 +35,12 @@ def test_full7_checkpoint_v4_resume_and_provenance(tmp_path):
     assert saved["expert_profile"] == "full_7"
     assert saved["expert_order"] == list(order)
     assert saved["source_code_sha256"]["model/moe_gating_core.py"]
+    from training.checkpoint_manager import (
+        _FULL7_BRANCH_BASE_SOURCE_CODE_SHA256, _validate_gate_payload,
+    )
+    previous_revision = dict(saved)
+    previous_revision["source_code_sha256"] = dict(_FULL7_BRANCH_BASE_SOURCE_CODE_SHA256)
+    _validate_gate_payload(previous_revision, gate)
     restored = GatingNetwork(29959, 7, profile="full_7")
     opt = torch.optim.AdamW(restored.parameters())
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt)

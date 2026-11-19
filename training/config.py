@@ -84,7 +84,7 @@ def load_moe_training_config(path: str | Path) -> dict[str, Any]:
     _keys(data, field="data", allowed={"feature_store_root", "profile", "score_review_file",
                                         "allow_train_validation_audio_overlap"}, required={"feature_store_root"})
     if "profile" in data and (not isinstance(data["profile"], str)
-                              or data["profile"] not in {"top1_4", "full_9", "full_7"}):
+                              or data["profile"] not in {"top1_4", "full_9", "full_7", "full_8"}):
         raise MoeTrainingConfigError("data.profile must name a registered expert profile")
     data["feature_store_root"] = _resolve_relative(data["feature_store_root"], base=config_path.parent, field="data.feature_store_root")
     if "score_review_file" in data:

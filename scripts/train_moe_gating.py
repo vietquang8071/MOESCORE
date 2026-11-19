@@ -31,7 +31,9 @@ from data.audio_overlap import (
 )
 from model.moe_gating_core import GatingNetwork
 from model.expert_adapters.registry import profile_contract
-from training.checkpoint_manager import MoeCheckpointManager, full7_source_code_sha256
+from training.checkpoint_manager import (
+    MoeCheckpointManager, full7_source_code_sha256, full8_source_code_sha256,
+)
 from training.config import load_moe_training_config
 from training.moe_evaluator import MoeGateEvaluator
 from training.moe_trainer import MoeGateTrainer
@@ -162,7 +164,7 @@ def _store_provenance(train: MoeTrainingDataset, validation: MoeTrainingDataset,
     train_contract, val_contract = preprocessing_contract(train_manifest), preprocessing_contract(val_manifest)
     if train_contract != val_contract:
         raise ValueError("train and validation preprocessing contracts differ")
-    if train_manifest.get("expert_profile") == "full_7":
+    if train_manifest.get("expert_profile") in {"full_7", "full_8"}:
         train_rows = validate_source_audio_records(
             train_manifest["assembly_identity"].get("ordered_source_fingerprints", []), split="train",
         )
@@ -177,13 +179,13 @@ def _store_provenance(train: MoeTrainingDataset, validation: MoeTrainingDataset,
             raise_for_audio_overlap(overlap_diagnostic, stage="Global Gate")
         emit_audio_overlap_warning(overlap_diagnostic, stage="Global Gate training")
     elif allow_train_validation_audio_overlap:
-        raise ValueError("allow_train_validation_audio_overlap is supported only for real Full7 feature stores")
+        raise ValueError("allow_train_validation_audio_overlap is supported only for real Full7/Full8 feature stores")
     identity = {
         "train": train.identity,
         "validation": validation.identity,
         "preprocessing_contract": train_contract,
     }
-    if train_manifest.get("expert_profile") == "full_7":
+    if train_manifest.get("expert_profile") in {"full_7", "full_8"}:
         identity["source_wav_sha256_by_split"] = {
             "train": [row["wav_sha256"] for row in train_rows],
             "validation": [row["wav_sha256"] for row in validation_rows],
@@ -226,7 +228,7 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
     score_review_policy = None
     human_review_performed = False
 
-    if profile == "full_7":
+    if profile in {"full_7", "full_8"}:
         (score_audit, score_review_sha256, score_review_policy,
          human_review_performed) = _resolve_full7_score_review(
             store_root,
@@ -242,7 +244,7 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
     validation_loader = _feature_loader(validation_ds,
                                         batch_size=config["validation"]["batch_size"])
     if config["data"].get("profile", profile) != profile:
-        raise ValueError("configured expert profile differs from Full7 feature store")
+        raise ValueError(f"configured expert profile differs from {profile} feature store")
     order, _, width = profile_contract(profile)
     gate = GatingNetwork(input_feature_dim=width, num_experts=len(order), profile=profile).to(device)
     trainer = MoeGateTrainer(
@@ -259,9 +261,9 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
     output_dir.mkdir(parents=True, exist_ok=True)
     latest_path = output_dir / "latest_gate.pt"
     best_path = output_dir / "best_gate.pt"
-    if profile == "full_7":
+    if profile in {"full_7", "full_8"}:
         _reject_accidental_checkpoint_overwrite(output_dir, resume=resume)
-    if profile == "full_7" and resume is not None:
+    if profile in {"full_7", "full_8"} and resume is not None:
         for existing_path in (latest_path, best_path):
             if not existing_path.is_file():
                 continue
@@ -324,7 +326,7 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
             train_rows_seen += int(batch["labels_raw"].shape[0])
             interval = config["training"]["checkpoint_interval_steps"]
             if (trainer.global_step % interval == 0 and
-                    (profile != "full_7" or _interval_checkpoint_due(
+                    (profile not in {"full_7", "full_8"} or _interval_checkpoint_due(
                         global_step=trainer.global_step, interval=interval,
                         sampler_cursor=sampler.cursor, sample_count=len(train_ds),
                         batch_size=config["training"]["batch_size"]))):
@@ -418,7 +420,7 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
         "score_audit": score_audit,
         "score_review_sha256": score_review_sha256,
     }
-    if profile == "full_7":
+    if profile in {"full_7", "full_8"}:
         report.update({
             "score_review_policy": score_review_policy,
             "human_review_performed": human_review_performed,
@@ -429,7 +431,7 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
         report["audio_overlap_diagnostic"] = overlap_diagnostic
         if validation_warning:
             report["validation_warning"] = validation_warning
-    if profile == "full_7":
+    if profile in {"full_7", "full_8"}:
         def file_hash(path: Path) -> str | None:
             if not path.is_file():
                 return None
@@ -443,11 +445,12 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
                                 capture_output=True, text=True, check=False)
         git_status = subprocess.run(["git", "status", "--porcelain"], cwd=PROJECT_ROOT,
                                     capture_output=True, text=True, check=False)
+        source_hashes = full8_source_code_sha256() if profile == "full_8" else full7_source_code_sha256()
         manifest = {
-            "schema_version": 1, "expert_profile": "full_7",
+            "schema_version": 1, "expert_profile": profile,
             "git_commit": commit.stdout.strip() if commit.returncode == 0 else None,
             "working_tree_dirty": bool(git_status.stdout.strip()) if git_status.returncode == 0 else None,
-            "source_code_sha256": full7_source_code_sha256(),
+            "source_code_sha256": source_hashes,
             "python_version": platform.python_version(), "torch_version": str(torch.__version__),
             "config_sha256": hashlib.sha256(json.dumps(run_config, sort_keys=True,
                 separators=(",", ":"), allow_nan=False).encode()).hexdigest(),

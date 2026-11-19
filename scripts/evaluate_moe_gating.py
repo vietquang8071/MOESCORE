@@ -39,7 +39,7 @@ def evaluate_checkpoint(config: dict, checkpoint: str, *, device_override: str |
     dataset = MoeTrainingDataset(config["data"]["feature_store_root"], split="validation", require_labels=True)
     profile = dataset.manifest.get("expert_profile", "top1_4")
     if config["data"].get("profile", profile) != profile:
-        raise ValueError("configured expert profile differs from validation feature store")
+        raise ValueError(f"configured expert profile differs from {profile} validation feature store")
     order, _, width = profile_contract(profile)
     gate = GatingNetwork(input_feature_dim=width, num_experts=len(order), profile=profile).to(device)
     payload = MoeCheckpointManager().load_for_inference(

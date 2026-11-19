@@ -1,0 +1,9 @@
+runtime:
+  device: cuda:0
+  offline: true
+  cache_dir: ../hf_cache
+experts:
+  expert8:
+    # Replace these paths in the caller's generated Kaggle config.
+    base_checkpoint: ../weights/pretrained/checkpoint-30.pth
+    finetuned_checkpoint: ../weights/m2d-lora-Nam.pt

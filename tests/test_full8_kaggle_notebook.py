@@ -33,6 +33,8 @@ def test_full8_notebook_uses_exact_e8_checkpoint_and_preflights_before_expensive
     assert '"m2d-lora-Nam.pt"' in combined
     assert "E8_LORA_CHECKPOINT_OVERRIDE = None" in combined
     assert 'input_root.rglob(filename)' in combined
+    assert "WEIGHTS_DATASET_ROOT" not in combined
+    assert "/kaggle/input/datasets/qnv8071/xacle-weights" not in combined
     assert "Ambiguous" in combined
     assert "load_expert8_checkpoint(E8_LORA_CHECKPOINT)" in combined
     assert "validate_base_m2d_checkpoint(E8_BASE_CHECKPOINT)" in combined

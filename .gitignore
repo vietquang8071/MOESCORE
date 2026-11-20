@@ -76,4 +76,7 @@ dist/
 /data/**/*.wav
 /data/**/*.flac
 /data/**/*.mp3
+/recovery/
 *.zip
+*.pt
+*.npz

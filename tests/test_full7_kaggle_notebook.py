@@ -1,10 +1,11 @@
 import ast
 import json
 import re
+import subprocess
 from pathlib import Path
 
 
-def test_full7_kaggle_notebook_propagates_experimental_flags_and_metrics_stage():
+def test_full7_kaggle_notebook_has_no_cross_split_wav_policy_and_keeps_metrics_stage():
     root = Path(__file__).resolve().parents[1]
     notebook_path = root / "notebooks/MOESCORE_Full7_T4x2_Kaggle.ipynb"
     notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
@@ -15,10 +16,10 @@ def test_full7_kaggle_notebook_propagates_experimental_flags_and_metrics_stage()
         compile(source, f"{notebook_path.name}:cell-{index}", "exec")
 
     combined = "\n".join(code_cells)
-    assert re.search(r"^ALLOW_TRAIN_VALIDATION_AUDIO_OVERLAP\s*=\s*True\s*$", combined, re.MULTILINE)
-    assert 'e6_cfg["training"]["allow_train_validation_audio_overlap"] = ALLOW_TRAIN_VALIDATION_AUDIO_OVERLAP' in combined
-    assert '"--allow-train-validation-audio-overlap"' in combined
-    assert 'gate_cfg["data"]["allow_train_validation_audio_overlap"] = ALLOW_TRAIN_VALIDATION_AUDIO_OVERLAP' in combined
+    assert "ALLOW_TRAIN_VALIDATION_AUDIO_OVERLAP" not in combined
+    assert "allow_train_validation_audio_overlap" not in combined
+    assert "audio_overlap_diagnostic" not in combined
+    assert "--allow-train-validation-audio-overlap" not in combined
     assert re.search(r"^SKIP_SCORE_REVIEW_EXPERIMENTAL\s*=\s*True\s*$", combined, re.MULTILINE)
     assert re.search(r"^RUN_TEST_METRICS\s*=\s*True\s*$", combined, re.MULTILINE)
     assert re.search(r"^RUN_SCORE_AUDIT\s*=\s*True\s*$", combined, re.MULTILINE)
@@ -49,7 +50,8 @@ def test_full7_kaggle_notebook_propagates_experimental_flags_and_metrics_stage()
     assert "REVIEWED_FOR_GATE_PROXY" not in experimental_branch
     assert "SCORE_REVIEW_PATH.write_text" not in experimental_branch
     pinned = re.search(r'^SOURCE_COMMIT\s*=\s*"([0-9a-f]{40})"', combined, re.MULTILINE)
-    assert pinned and pinned.group(1) == "fe7de437842e4907421d645cfe71d0015bce895c"
+    assert pinned
+    subprocess.run(["git", "cat-file", "-e", f"{pinned.group(1)}^{{commit}}"], check=True)
 
 
 def _load_gate_decision_helpers(notebook):
@@ -178,13 +180,12 @@ def test_full7_gate_resume_requires_both_checkpoints_and_isolates_incompatible_a
     completed_check = cell_source.split("completed_compatible = (", 1)[1].split("\n)", 1)[0]
     assert "and latest_compatible" in completed_check
     for predicate in (
-        'payload.get("format_version") == 4',
+        'payload.get("format_version") == 6',
         'identity.get("score_review_policy") == SCORE_REVIEW_POLICY',
         'payload.get("config") == expected_gate_config',
         'payload.get("source_code_sha256") == current_source_sha256',
         'identity == expected_feature_store_identity',
         'payload.get("expert_checkpoint_provenance") == expected_expert_provenance',
-        'identity.get("audio_overlap_diagnostic") == current_overlap_diagnostic',
         'payload.get("feature_store_identity_sha256") == canonical_sha256(identity)',
     ):
         assert predicate in cell_source

@@ -92,7 +92,9 @@ def test_full8_notebook_has_cache_reuse_and_full_pipeline_in_order():
     assert positions == sorted(positions)
     assert "E8_BATCH_SIZE = 1" in combined
     assert "E8_SHARD_SIZE = 8" in combined
-    assert "--allow-train-validation-audio-overlap" in combined
+    assert "--allow-train-validation-audio-overlap" not in combined
+    assert "ALLOW_TRAIN_VALIDATION_AUDIO_OVERLAP" not in combined
+    assert "build_train_validation_audio_overlap_diagnostic" not in combined
 
 
 def test_full8_notebook_propagates_experimental_review_and_never_fabricates_review():
@@ -124,14 +126,13 @@ def test_test_ground_truth_is_accessed_only_after_inference_freeze():
     assert "ALLOW_POST_INFERENCE_TEST_LABEL_ACCESS" in cells[metric_cell]
 
 
-def test_full7_kaggle_notebook_remains_unmodified():
+def test_full7_kaggle_notebook_removes_retired_overlap_interfaces():
     root = Path(__file__).parents[1]
-    actual = (root / "notebooks/MOESCORE_Full7_T4x2_Kaggle.ipynb").read_bytes()
-    expected = subprocess.run(
-        ["git", "show", "HEAD:notebooks/MOESCORE_Full7_T4x2_Kaggle.ipynb"],
-        check=True, capture_output=True,
-    ).stdout
-    assert actual == expected
+    cells = json.loads((root / "notebooks/MOESCORE_Full7_T4x2_Kaggle.ipynb").read_text())['cells']
+    combined = "\n".join("".join(cell.get("source", [])) for cell in cells)
+    assert "ALLOW_TRAIN_VALIDATION_AUDIO_OVERLAP" not in combined
+    assert "--allow-train-validation-audio-overlap" not in combined
+    assert "build_train_validation_audio_overlap_diagnostic" not in combined
 
 
 def test_central_config_and_full_profile_contract_are_explicit():
@@ -155,15 +156,15 @@ def test_full7_cache_accepts_distinct_split_source_manifest_hashes():
         "train": {"expert_profile": "full_7", "feature_width": 29959, "score_width": 7,
                   "labels_present": True, "source_manifest_sha256": "a" * 64,
                   "shards": [{"count": 1, "sample_ids": ["train:a.wav"], "wave_file_names": ["a.wav"]}],
-                  "assembly_identity": {"ordered_source_fingerprints": [row("train", "a.wav", "a" * 64)]}},
+                  "assembly_identity": {"ordered_source_fingerprints": [row("train", "a.wav", "f" * 64)]}},
         "validation": {"expert_profile": "full_7", "feature_width": 29959, "score_width": 7,
                        "labels_present": True, "source_manifest_sha256": "b" * 64,
                        "shards": [{"count": 1, "sample_ids": ["validation:b.wav"], "wave_file_names": ["b.wav"]}],
-                       "assembly_identity": {"ordered_source_fingerprints": [row("validation", "b.wav", "b" * 64)]}},
+                       "assembly_identity": {"ordered_source_fingerprints": [row("validation", "b.wav", "f" * 64)]}},
         "test": {"expert_profile": "full_7", "feature_width": 29959, "score_width": 7,
                  "labels_present": False, "source_manifest_sha256": "c" * 64,
                  "shards": [{"count": 1, "sample_ids": ["test:c.wav"], "wave_file_names": ["c.wav"]}],
-                 "assembly_identity": {"ordered_source_fingerprints": [row("test", "c.wav", "c" * 64)]}},
+                 "assembly_identity": {"ordered_source_fingerprints": [row("test", "c.wav", "f" * 64)]}},
     }
     calls = []
 
@@ -171,16 +172,13 @@ def test_full7_cache_accepts_distinct_split_source_manifest_hashes():
         calls.append((split, require_labels))
         return manifests[split]
 
-    diagnostic = {"overlapping_sha256_count": 0, "allow_train_validation_audio_overlap": False}
     fn, _ = _function("verify_full7_candidate", {
         "Path": Path,
         "EXPECTED_COUNTS": {"train": 1, "validation": 1, "test": 1},
-        "ALLOW_TRAIN_VALIDATION_AUDIO_OVERLAP": False,
         "validate_feature_store": validate,
-        "build_train_validation_audio_overlap_diagnostic": lambda *a, **k: diagnostic,
     })
     with tempfile.TemporaryDirectory() as tmp:
-        result, observed = fn(tmp)
+        result = fn(tmp)
     assert set(result) == {"train", "validation", "test"}
     assert [observed for observed, _ in calls] == ["train", "validation", "test"]
     assert [labels for _, labels in calls] == [True, True, False]
@@ -516,7 +514,7 @@ def test_notebook_verifies_e5_e6_and_e8_cache_skip_without_changing_policies():
     assert 'for checkpoint_path, checkpoint_role in ((E5_BEST, "best"), (E5_FINAL, "final_best"))' in combined
     assert "validation_provenance" in combined and "validation_sample_ids" in combined
     assert "load_set_b_checkpoint" in combined
-    assert "expert6_final.pt" in combined and "audio_overlap_diagnostic_sha256" in combined
+    assert "expert6_final.pt" in combined and "training_membership" in combined
     assert "verify_existing_e8_cache" in combined
     skip_branch = next(source for source in cells if "verify_existing_e8_cache" in source and "RUN_E8_EXTRACTION" in source)
     assert "else" in skip_branch and "verify_existing_e8_cache" in skip_branch

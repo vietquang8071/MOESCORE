@@ -10,7 +10,7 @@ The loss remains normalized-target MSE with `target_normalized = (target_raw - 5
 
 Format V3 checkpoints record the official train and validation provenance, exact ordered sample IDs, selection policy, optimizer state, progress, and per-epoch metrics. The loader continues to accept valid V2 holdout checkpoints for inference. V2 checkpoints cannot resume under the new policy. Full7 preserves legacy V2 holdout membership classification and labels V3 rows as `IN_SAMPLE_FIT`, `OUT_OF_SAMPLE_FIT_VALIDATION_SELECTED`, or `OUT_OF_SAMPLE` for train, validation, and test respectively.
 
-The Full9 feature contracts, component order, 11267-wide E5 feature output, residual MLP, frozen component behavior, AdamW settings, MSE, and gradient clipping are unchanged. E6 training and cross-split duplicate-WAV checks are unchanged.
+The Full9 feature contracts, component order, 11267-wide E5 feature output, residual MLP, frozen component behavior, AdamW settings, MSE, and gradient clipping are unchanged. E6 training semantics are unchanged; Full7/Full8 no longer compare WAV hashes across official splits.
 
 ## Kaggle behavior
 

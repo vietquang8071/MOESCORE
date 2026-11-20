@@ -5,7 +5,6 @@ runtime:
 data:
   feature_store_root: ../full7_feature_stores
   profile: full_7
-  allow_train_validation_audio_overlap: false
 output_dir: ../runs/moe_full7
 training:
   batch_size: 8

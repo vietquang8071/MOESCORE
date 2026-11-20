@@ -8,58 +8,54 @@ from training.moe_trainer import MoeGateTrainer
 from training.sampler import StatefulRandomSampler
 
 
-def test_full7_checkpoint_v4_resume_and_provenance(tmp_path):
+def test_full7_checkpoint_format6_resume_and_legacy_inference(tmp_path):
     gate = GatingNetwork(29959, 7, profile="full_7")
     optimizer = torch.optim.AdamW(gate.parameters())
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
     order, _, _ = profile_contract("full_7")
     provenance = {name: {"sha256": f"{index + 1:064x}"} for index, name in enumerate(order)}
-    from data.audio_overlap import build_train_validation_audio_overlap_diagnostic
-    diagnostic = build_train_validation_audio_overlap_diagnostic([], [], allow_train_validation_audio_overlap=False)
     identity = {"train": "a" * 64, "validation": "b" * 64,
                 "preprocessing_contract": {"score_contracts": {"policy": "synthetic"}},
                 "score_review_policy": "EXPERIMENTAL_SKIPPED",
                 "source_wav_sha256_by_split": {"train": ["a" * 64], "validation": ["b" * 64]},
-                "source_sample_ids_by_split": {"train": ["train:a.wav"], "validation": ["validation:b.wav"]},
-                "audio_overlap_diagnostic": diagnostic}
+                "source_sample_ids_by_split": {"train": ["train:a.wav"], "validation": ["validation:b.wav"]}}
+    config = {"seed": 2027, "data": {"score_review_policy": "EXPERIMENTAL_SKIPPED"}}
     manager = MoeCheckpointManager()
     path = tmp_path / "latest_gate.pt"
     manager.save(path, gating_network=gate, optimizer=optimizer, scheduler=scheduler,
                  epoch=1, global_step=3,
-                 config={"seed": 2027, "data": {"allow_train_validation_audio_overlap": False,
-                                                       "score_review_policy": "EXPERIMENTAL_SKIPPED"}},
+                 config=config,
                  feature_store_identity=identity, expert_checkpoint_provenance=provenance,
                  sampler_state={"epoch": 1, "cursor": 2})
     saved = torch.load(path, weights_only=True)
-    assert saved["format_version"] == 4
+    assert saved["format_version"] == 6
     assert saved["expert_profile"] == "full_7"
     assert saved["expert_order"] == list(order)
     assert saved["source_code_sha256"]["model/moe_gating_core.py"]
+    assert "data/source_identity.py" in saved["source_code_sha256"]
+    assert "audio_overlap_diagnostic" not in saved["feature_store_identity"]
     from training.checkpoint_manager import (
-        _FULL7_BRANCH_BASE_SOURCE_CODE_SHA256, _validate_gate_payload,
+        FULL7_CHECKPOINT_FORMAT_VERSION,
+        _FULL7_PRE_OVERLAP_SOURCE_CODE_SHA256, _LEGACY_FULL7_SOURCE_CODE_SHA256,
+        _fingerprint,
     )
-    previous_revision = dict(saved)
-    previous_revision["source_code_sha256"] = dict(_FULL7_BRANCH_BASE_SOURCE_CODE_SHA256)
-    _validate_gate_payload(previous_revision, gate)
+    assert FULL7_CHECKPOINT_FORMAT_VERSION == 6
     restored = GatingNetwork(29959, 7, profile="full_7")
     opt = torch.optim.AdamW(restored.parameters())
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt)
     loaded = manager.load(path, gating_network=restored, optimizer=opt, scheduler=sched,
-                          expected_config={"seed": 2027, "data": {"allow_train_validation_audio_overlap": False,
-                                                                    "score_review_policy": "EXPERIMENTAL_SKIPPED"}},
+                          expected_config=config,
                           expected_feature_store_identity=identity,
                           expected_expert_checkpoint_provenance=provenance)
     assert loaded["sampler_state"]["cursor"] == 2
     with pytest.raises(ValueError, match="configuration mismatch"):
         manager.load(path, gating_network=restored, optimizer=opt, scheduler=sched,
-                          expected_config={"seed": 2027, "data": {"allow_train_validation_audio_overlap": True,
-                                                                    "score_review_policy": "EXPERIMENTAL_SKIPPED"}},
+                          expected_config={"seed": 2027, "data": {"score_review_policy": "HUMAN_REVIEWED"}},
                      expected_feature_store_identity=identity,
                      expected_expert_checkpoint_provenance=provenance)
     human_identity = {**identity, "score_review_policy": "HUMAN_REVIEWED",
                       "score_review_sha256": "c" * 64}
-    human_config = {"seed": 2027, "data": {"allow_train_validation_audio_overlap": False,
-                                           "score_review_policy": "HUMAN_REVIEWED"}}
+    human_config = {"seed": 2027, "data": {"score_review_policy": "HUMAN_REVIEWED"}}
     with pytest.raises(ValueError, match="score review policy mismatch"):
         manager.load(path, gating_network=restored, optimizer=opt, scheduler=sched,
                      expected_config=human_config,
@@ -72,8 +68,7 @@ def test_full7_checkpoint_v4_resume_and_provenance(tmp_path):
     with pytest.raises(ValueError, match="score review policy mismatch"):
         manager.load(path.with_name("human_gate.pt"), gating_network=restored,
                      optimizer=opt, scheduler=sched,
-                     expected_config={"seed": 2027, "data": {"allow_train_validation_audio_overlap": False,
-                                                               "score_review_policy": "EXPERIMENTAL_SKIPPED"}},
+                     expected_config=config,
                      expected_feature_store_identity=identity,
                      expected_expert_checkpoint_provenance=provenance)
     with pytest.raises(ValueError, match="provenance"):
@@ -92,8 +87,31 @@ def test_full7_checkpoint_v4_resume_and_provenance(tmp_path):
         manager.load_for_inference(altered, gating_network=restored,
             expected_expert_checkpoint_provenance=provenance)
 
-    from training.checkpoint_manager import _LEGACY_FULL7_SOURCE_CODE_SHA256, _fingerprint
-    legacy = torch.load(path, weights_only=True)
+    historical = torch.load(path, weights_only=True)
+    historical["format_version"] = 4
+    historical["source_code_sha256"] = dict(_FULL7_PRE_OVERLAP_SOURCE_CODE_SHA256)
+    historical["config"]["data"]["allow_train_validation_audio_overlap"] = False
+    historical["config_sha256"] = _fingerprint(historical["config"], "config")
+    historical["feature_store_identity"]["audio_overlap_diagnostic"] = {"historical": True}
+    historical["feature_store_identity_sha256"] = _fingerprint(
+        historical["feature_store_identity"], "feature_store_identity",
+    )
+    historical_path = tmp_path / "historical_gate.pt"
+    torch.save(historical, historical_path)
+    loaded_historical = manager.load_for_inference(
+        historical_path, gating_network=restored,
+        expected_expert_checkpoint_provenance=provenance,
+    )
+    assert loaded_historical["format_version"] == 4
+    with pytest.raises(ValueError, match="legacy Full7/Full8 gate checkpoint.*cannot resume"):
+        manager.load(
+            historical_path, gating_network=restored, optimizer=opt, scheduler=sched,
+            expected_config=historical["config"],
+            expected_feature_store_identity=historical["feature_store_identity"],
+            expected_expert_checkpoint_provenance=provenance,
+        )
+
+    legacy = dict(historical)
     legacy["format_version"] = 3
     legacy["source_code_sha256"] = dict(_LEGACY_FULL7_SOURCE_CODE_SHA256)
     legacy["config"]["data"].pop("allow_train_validation_audio_overlap")
@@ -101,9 +119,7 @@ def test_full7_checkpoint_v4_resume_and_provenance(tmp_path):
     legacy["config_sha256"] = _fingerprint(legacy["config"], "config")
     legacy["feature_store_identity"].pop("audio_overlap_diagnostic")
     legacy["feature_store_identity"].pop("source_sample_ids_by_split")
-    legacy["feature_store_identity_sha256"] = _fingerprint(
-        legacy["feature_store_identity"], "feature_store_identity",
-    )
+    legacy["feature_store_identity_sha256"] = _fingerprint(legacy["feature_store_identity"], "feature_store_identity")
     legacy_path = tmp_path / "legacy_gate.pt"
     torch.save(legacy, legacy_path)
     loaded_legacy = manager.load_for_inference(
@@ -111,7 +127,7 @@ def test_full7_checkpoint_v4_resume_and_provenance(tmp_path):
         expected_expert_checkpoint_provenance=provenance,
     )
     assert loaded_legacy["format_version"] == 3
-    with pytest.raises(ValueError, match="legacy Full7 gate checkpoint.*cannot resume"):
+    with pytest.raises(ValueError, match="legacy Full7/Full8 gate checkpoint.*cannot resume"):
         manager.load(
             legacy_path, gating_network=restored, optimizer=opt, scheduler=sched,
             expected_config={"seed": 2027},
@@ -139,17 +155,12 @@ def test_full7_interrupted_step_matches_continuous_cpu(tmp_path):
                 "score_review_policy": "SYNTHETIC_NOT_APPLICABLE",
                 "source_wav_sha256_by_split": {"train": ["a" * 64], "validation": ["b" * 64]},
                 "source_sample_ids_by_split": {"train": ["train:a.wav"], "validation": ["validation:b.wav"]}}
-    from data.audio_overlap import build_train_validation_audio_overlap_diagnostic
-    identity["audio_overlap_diagnostic"] = build_train_validation_audio_overlap_diagnostic(
-        [], [], allow_train_validation_audio_overlap=False,
-    )
     sampler = StatefulRandomSampler(range(2), seed=2027)
     path = tmp_path / "latest_gate.pt"
     manager = MoeCheckpointManager()
     manager.save(path, gating_network=gate, optimizer=trainer.optimizer, scheduler=trainer.scheduler,
                  epoch=0, global_step=1,
-                 config={"seed": 2027, "data": {"allow_train_validation_audio_overlap": False,
-                                                   "score_review_policy": "SYNTHETIC_NOT_APPLICABLE"}},
+                 config={"seed": 2027, "data": {"score_review_policy": "SYNTHETIC_NOT_APPLICABLE"}},
                  feature_store_identity=identity, expert_checkpoint_provenance=provenance,
                  sampler_state=sampler.state_dict())
     trainer.train_step(batch)
@@ -159,8 +170,7 @@ def test_full7_interrupted_step_matches_continuous_cpu(tmp_path):
     resumed = MoeGateTrainer(resumed_gate, loss)
     state = manager.load(path, gating_network=resumed_gate, optimizer=resumed.optimizer,
                          scheduler=resumed.scheduler,
-                         expected_config={"seed": 2027, "data": {"allow_train_validation_audio_overlap": False,
-                                                                   "score_review_policy": "SYNTHETIC_NOT_APPLICABLE"}},
+                         expected_config={"seed": 2027, "data": {"score_review_policy": "SYNTHETIC_NOT_APPLICABLE"}},
                          expected_feature_store_identity=identity,
                          expected_expert_checkpoint_provenance=provenance)
     restored_sampler = StatefulRandomSampler(range(2), seed=2027)

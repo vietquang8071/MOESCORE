@@ -15,4 +15,3 @@ training:
   gradient_clip: 1.0
   seed: 42
   selection_metric: official_validation_mse
-  allow_train_validation_audio_overlap: false

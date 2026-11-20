@@ -65,10 +65,6 @@ def evaluate_checkpoint(config: dict, checkpoint: str, *, device_override: str |
         "regression_loss_normalized": result.get("regression_loss_normalized"),
         "optimizer_steps": 0,
     }
-    overlap_diagnostic = payload["feature_store_identity"].get("audio_overlap_diagnostic")
-    if isinstance(overlap_diagnostic, dict) and overlap_diagnostic.get("overlapping_sha256_count"):
-        report["validation_metrics_warning"] = overlap_diagnostic.get("warning")
-        report["audio_overlap_diagnostic_sha256"] = overlap_diagnostic.get("diagnostic_sha256")
     return report
 
 

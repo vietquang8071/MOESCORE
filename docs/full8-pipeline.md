@@ -24,10 +24,10 @@ python scripts/build_full8_feature_store.py \
   --output-root runs/full8_store
 ```
 
-Train the Full8 Gate from scratch using `configs/moe_full8.example.yaml`, setting its feature-store and output paths. For the accepted research experiment with known train/validation WAV overlap, explicitly set `data.allow_train_validation_audio_overlap: true`; test-split overlap remains rejected. Set `MOESCORE_EXPERIMENTAL_SKIP_SCORE_REVIEW=1` only for research runs that intentionally skip human score review. The train-only score audit still runs and the checkpoint is marked `EXPERIMENTAL_SKIPPED`.
+Train the Full8 Gate from scratch using `configs/moe_full8.example.yaml`, setting its feature-store and output paths. Train, validation and test are validated independently against their own source manifests; WAV hashes are not compared across splits. Set `MOESCORE_EXPERIMENTAL_SKIP_SCORE_REVIEW=1` only for research runs that intentionally skip human score review. The train-only score audit still runs and the checkpoint is marked `EXPERIMENTAL_SKIPPED`.
 
 ## Kaggle
 
 Use [MOESCORE_Full8_T4x2_Kaggle.ipynb](../notebooks/MOESCORE_Full8_T4x2_Kaggle.ipynb), attach the XACLE data and the Full9 cache or a verified Full7 store, and attach the E8 LoRA and base M2D checkpoints. The notebook preflights both checkpoint files before expensive stages, reuses existing feature caches, executes E8 on one T4 at a time, and trains a distinct Full8 Gate. `Save & Run All` evaluates official validation and performs label-free test inference before any optional post-inference test-label metrics.
 
-An experimental train/validation audio overlap can make validation results optimistically biased. Human review is not claimed when the experimental bypass is selected. Post-inference test metrics are research-only and do not establish independent validation or competition compliance.
+The current Full7/Full8 implementation does not compare WAV hashes across official splits. Human review is not claimed when the experimental score-review bypass is selected. Post-inference test metrics are research-only and do not establish competition compliance.

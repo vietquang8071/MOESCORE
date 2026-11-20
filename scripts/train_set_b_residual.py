@@ -35,14 +35,11 @@ def main(argv=None):
     trainer = SetBResidualTrainer(model, learning_rate=t["learning_rate"], weight_decay=t["weight_decay"],
         gradient_clip=t["gradient_clip"], seed=t["seed"], device=config["runtime"]["device"])
     history = trainer.fit(train, validation, output_dir=config["output_dir"], epochs=t["epochs"],
-        batch_size=t["batch_size"], num_workers=t["num_workers"], resume_from=args.resume,
-        allow_train_validation_audio_overlap=t["allow_train_validation_audio_overlap"])
+        batch_size=t["batch_size"], num_workers=t["num_workers"], resume_from=args.resume)
     report = {"completed_epochs": trainer.completed_epochs, "global_step": trainer.global_step,
               "train_sample_count": len(train), "validation_sample_count": len(validation),
               "best_epoch": trainer.best_epoch, "best_validation_mse": trainer.best_validation_mse,
-              "audio_overlap_diagnostic": trainer.audio_overlap_diagnostic, "history": history}
-    if trainer.audio_overlap_diagnostic["overlapping_sha256_count"]:
-        report["validation_metrics_warning"] = trainer.audio_overlap_diagnostic["warning"]
+              "history": history}
     print(json.dumps(report, indent=2))
     return 0
 

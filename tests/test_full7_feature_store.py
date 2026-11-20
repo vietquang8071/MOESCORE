@@ -79,7 +79,7 @@ def test_partial_full7_shard_rejects_changed_source_identity(tmp_path):
         writer("b" * 64).write_shard(0, **kwargs)
 
 
-def test_training_preflight_rejects_cross_split_duplicate_wav():
+def test_training_preflight_preserves_each_split_wav_provenance_without_comparing_splits():
     from scripts.train_moe_gating import _store_provenance
     order, dims, _ = profile_contract("full_7")
     provenance = {name: {"sha256": "a" * 64} for name in order}
@@ -91,23 +91,20 @@ def test_training_preflight_rejects_cross_split_duplicate_wav():
         "ordered_source_fingerprints": [{"sample_id": "train:a.wav", "wav_sha256": "f" * 64}]}}
     val_manifest = {**common, "assembly_identity": {**common["assembly_identity"],
         "ordered_source_fingerprints": [{"sample_id": "validation:b.wav", "wav_sha256": "f" * 64}]}}
-    with pytest.raises(ValueError, match="cross-split duplicate WAV"):
-        _store_provenance(SimpleNamespace(manifest=train_manifest, identity="a" * 64),
-                          SimpleNamespace(manifest=val_manifest, identity="b" * 64))
-    with pytest.warns(UserWarning, match="optimistically biased"):
-        _, identity = _store_provenance(
-            SimpleNamespace(manifest=train_manifest, identity="a" * 64),
-            SimpleNamespace(manifest=val_manifest, identity="b" * 64),
-            allow_train_validation_audio_overlap=True,
-        )
-    diagnostic = identity["audio_overlap_diagnostic"]
-    assert diagnostic["policy"] == "experimental_train_validation_audio_overlap"
-    assert diagnostic["overlapping_sha256_count"] == 1
-    assert diagnostic["overlaps"][0]["train_sample_ids"] == ["train:a.wav"]
-    assert diagnostic["overlaps"][0]["validation_sample_ids"] == ["validation:b.wav"]
+    _, identity = _store_provenance(
+        SimpleNamespace(manifest=train_manifest, identity="a" * 64),
+        SimpleNamespace(manifest=val_manifest, identity="b" * 64),
+    )
+    assert identity["source_wav_sha256_by_split"] == {
+        "train": ["f" * 64], "validation": ["f" * 64],
+    }
+    assert identity["source_sample_ids_by_split"] == {
+        "train": ["train:a.wav"], "validation": ["validation:b.wav"],
+    }
+    assert "audio_overlap_diagnostic" not in identity
 
 
-def test_moe_config_defaults_overlap_policy_to_strict_and_requires_boolean(tmp_path):
+def test_moe_config_rejects_removed_overlap_configuration(tmp_path):
     import yaml
     from training.config import load_moe_training_config
 
@@ -116,10 +113,10 @@ def test_moe_config_defaults_overlap_policy_to_strict_and_requires_boolean(tmp_p
     config_path = tmp_path / "moe.yaml"
     raw["data"]["feature_store_root"] = str(tmp_path / "store")
     config_path.write_text(yaml.safe_dump(raw))
-    assert load_moe_training_config(config_path)["data"]["allow_train_validation_audio_overlap"] is False
-    raw["data"]["allow_train_validation_audio_overlap"] = "yes"
+    assert "allow_train_validation_audio_overlap" not in load_moe_training_config(config_path)["data"]
+    raw["data"]["allow_train_validation_audio_overlap"] = True
     config_path.write_text(yaml.safe_dump(raw))
-    with pytest.raises(ValueError, match="boolean"):
+    with pytest.raises(ValueError, match="unknown field"):
         load_moe_training_config(config_path)
 
 
@@ -128,7 +125,7 @@ def test_moe_config_defaults_overlap_policy_to_strict_and_requires_boolean(tmp_p
     ([{"sample_id": "train:a.wav", "wav_sha256": "a" * 64},
       {"sample_id": "train:a.wav", "wav_sha256": "b" * 64}], "duplicate train source sample ID"),
 ])
-def test_global_gate_experimental_policy_still_rejects_invalid_source_identity(rows, message):
+def test_global_gate_still_rejects_invalid_per_split_source_identity(rows, message):
     from scripts.train_moe_gating import _store_provenance
     order, dims, _ = profile_contract("full_7")
     provenance = {name: {"sha256": "a" * 64} for name in order}
@@ -142,7 +139,7 @@ def test_global_gate_experimental_policy_still_rejects_invalid_source_identity(r
         "ordered_source_fingerprints": [{"sample_id": "validation:b.wav", "wav_sha256": "c" * 64}]}},
         identity="b" * 64)
     with pytest.raises(ValueError, match=message):
-        _store_provenance(train, validation, allow_train_validation_audio_overlap=True)
+        _store_provenance(train, validation)
 
 
 def test_global_gate_loaders_keep_all_official_train_and_validation_rows():
@@ -164,11 +161,6 @@ def test_global_gate_loaders_keep_all_official_train_and_validation_rows():
     assert len(validation_seen) == len(set(validation_seen)) == 3000
 
 
-def test_inference_rejects_test_wav_seen_in_train():
-    from scripts.infer_moe_gating import _reject_test_wav_overlap
-    checkpoint_identity = {"source_wav_sha256_by_split": {"train": ["a" * 64],
-                                                            "validation": ["b" * 64]}}
-    test_manifest = {"assembly_identity": {"ordered_source_fingerprints": [
-        {"sample_id": "test:x.wav", "wav_sha256": "a" * 64}]}}
-    with pytest.raises(ValueError, match="cross-split duplicate WAV"):
-        _reject_test_wav_overlap(checkpoint_identity, test_manifest)
+def test_inference_no_longer_exposes_cross_split_wav_rejection_helper():
+    import scripts.infer_moe_gating as inference
+    assert not hasattr(inference, "_reject_test_wav_overlap")

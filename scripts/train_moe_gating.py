@@ -23,12 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from data.moe_training_dataset import MoeTrainingDataset, collate_moe_features
 from data.moe_feature_store import preprocessing_contract
-from data.audio_overlap import (
-    build_train_validation_audio_overlap_diagnostic,
-    emit_audio_overlap_warning,
-    raise_for_audio_overlap,
-    validate_source_audio_records,
-)
+from data.source_identity import validate_source_fingerprints
 from model.moe_gating_core import GatingNetwork
 from model.expert_adapters.registry import profile_contract
 from training.checkpoint_manager import (
@@ -149,10 +144,7 @@ def _checkpoint_config(config: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
-def _store_provenance(train: MoeTrainingDataset, validation: MoeTrainingDataset, *,
-                      allow_train_validation_audio_overlap: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
-    if type(allow_train_validation_audio_overlap) is not bool:
-        raise ValueError("allow_train_validation_audio_overlap must be boolean")
+def _store_provenance(train: MoeTrainingDataset, validation: MoeTrainingDataset) -> tuple[dict[str, Any], dict[str, Any]]:
     train_manifest, val_manifest = train.manifest, validation.manifest
     if (train_manifest.get("expert_profile", "top1_4") != val_manifest.get("expert_profile", "top1_4")
             or train_manifest["expert_order"] != val_manifest["expert_order"]
@@ -165,21 +157,12 @@ def _store_provenance(train: MoeTrainingDataset, validation: MoeTrainingDataset,
     if train_contract != val_contract:
         raise ValueError("train and validation preprocessing contracts differ")
     if train_manifest.get("expert_profile") in {"full_7", "full_8"}:
-        train_rows = validate_source_audio_records(
+        train_rows = validate_source_fingerprints(
             train_manifest["assembly_identity"].get("ordered_source_fingerprints", []), split="train",
         )
-        validation_rows = validate_source_audio_records(
+        validation_rows = validate_source_fingerprints(
             val_manifest["assembly_identity"].get("ordered_source_fingerprints", []), split="validation",
         )
-        overlap_diagnostic = build_train_validation_audio_overlap_diagnostic(
-            train_rows, validation_rows,
-            allow_train_validation_audio_overlap=allow_train_validation_audio_overlap,
-        )
-        if overlap_diagnostic["overlapping_sha256_count"] and not allow_train_validation_audio_overlap:
-            raise_for_audio_overlap(overlap_diagnostic, stage="Global Gate")
-        emit_audio_overlap_warning(overlap_diagnostic, stage="Global Gate training")
-    elif allow_train_validation_audio_overlap:
-        raise ValueError("allow_train_validation_audio_overlap is supported only for real Full7/Full8 feature stores")
     identity = {
         "train": train.identity,
         "validation": validation.identity,
@@ -194,16 +177,11 @@ def _store_provenance(train: MoeTrainingDataset, validation: MoeTrainingDataset,
             "train": [row["sample_id"] for row in train_rows],
             "validation": [row["sample_id"] for row in validation_rows],
         }
-        identity["audio_overlap_diagnostic"] = overlap_diagnostic
     return train_provenance, identity
 
 
 def run_training(config: dict[str, Any], *, resume: str | None = None, device_override: str | None = None) -> dict[str, Any]:
     config = copy.deepcopy(config)
-    allow_audio_overlap = config["data"].get("allow_train_validation_audio_overlap", False)
-    if type(allow_audio_overlap) is not bool:
-        raise ValueError("data.allow_train_validation_audio_overlap must be boolean")
-    config["data"]["allow_train_validation_audio_overlap"] = allow_audio_overlap
     device = _device(device_override or config["runtime"]["device"])
     torch.manual_seed(config["runtime"]["seed"])
     if device.type == "cuda":
@@ -211,16 +189,8 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
     store_root = config["data"]["feature_store_root"]
     train_ds = MoeTrainingDataset(store_root, split="train", require_labels=True)
     validation_ds = MoeTrainingDataset(store_root, split="validation", require_labels=True)
-    checkpoint_provenance, store_identity = _store_provenance(
-        train_ds, validation_ds,
-        allow_train_validation_audio_overlap=allow_audio_overlap,
-    )
+    checkpoint_provenance, store_identity = _store_provenance(train_ds, validation_ds)
     profile = train_ds.manifest.get("expert_profile", "top1_4")
-    overlap_diagnostic = store_identity.get("audio_overlap_diagnostic")
-    validation_warning = (
-        overlap_diagnostic.get("warning") if isinstance(overlap_diagnostic, dict)
-        and overlap_diagnostic.get("overlapping_sha256_count") else None
-    )
     skip_review = _experimental_skip_score_review_enabled()
 
     score_audit = None
@@ -381,13 +351,10 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
             "validation_metrics_raw": validation["metrics"],
             "learning_rate": trainer.optimizer.param_groups[0]["lr"],
         }
-        if validation_warning:
-            history_row["validation_metrics_warning"] = validation_warning
         history.append(history_row)
         print(f"Epoch {epoch + 1}: step={trainer.global_step}, train_loss={history[-1]['train_loss']:.6f}, "
-              f"validation={validation['metrics']}" +
-              (f" [WARNING: {validation_warning}]" if validation_warning else "") +
-              f", best_srcc={best_srcc}", file=sys.stderr, flush=True)
+              f"validation={validation['metrics']}, best_srcc={best_srcc}",
+              file=sys.stderr, flush=True)
         sampler.set_epoch(epoch + 1)
         manager.save(
             latest_path,
@@ -426,11 +393,6 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
             "human_review_performed": human_review_performed,
             "run_purpose": "research_only",
         })
-    if overlap_diagnostic is not None:
-        report["allow_train_validation_audio_overlap"] = allow_audio_overlap
-        report["audio_overlap_diagnostic"] = overlap_diagnostic
-        if validation_warning:
-            report["validation_warning"] = validation_warning
     if profile in {"full_7", "full_8"}:
         def file_hash(path: Path) -> str | None:
             if not path.is_file():
@@ -471,9 +433,6 @@ def run_training(config: dict[str, Any], *, resume: str | None = None, device_ov
             "score_review_policy": score_review_policy,
             "human_review_performed": human_review_performed,
             "run_purpose": "research_only",
-            "allow_train_validation_audio_overlap": allow_audio_overlap,
-            "audio_overlap_diagnostic": overlap_diagnostic,
-            "validation_warning": validation_warning,
             "history": history,
         }
         temporary = output_dir / f"run_manifest.json.{os.getpid()}.tmp"

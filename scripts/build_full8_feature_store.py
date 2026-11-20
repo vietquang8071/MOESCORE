@@ -22,14 +22,11 @@ def main(argv=None) -> int:
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--expert8-cache-id")
     parser.add_argument("--split", action="append", choices=("train", "validation", "test"))
-    parser.add_argument("--allow-train-validation-audio-overlap", action="store_true",
-                        help="Allow known train/validation WAV duplicates for this research run only")
     parser.add_argument("--report-json")
     args = parser.parse_args(argv)
     try:
         report = build_full8_stores(
             args.full7_root, args.expert8_cache_root, args.output_root,
-            allow_train_validation_audio_overlap=args.allow_train_validation_audio_overlap,
             splits=tuple(dict.fromkeys(args.split or ("train", "validation", "test"))),
             expert8_cache_id=args.expert8_cache_id,
         )

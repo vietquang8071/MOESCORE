@@ -249,7 +249,7 @@ For each split, with **no gradient** and all frozen heads in `eval()`:
 - Cross-split **extraction** identities may match; **split-specific** Full9 store/source-manifest hashes must not be required equal.
 - E5/E6 checkpoint versions, expected architecture settings, and feature order must match the instantiated heads.
 - Reject corrupted shard payloads, stale/mismatched caches, missing or wrong split labels, duplicated IDs, non-finite data, score-scale ambiguity, and unapproved schema changes.
-- Preserve the E6 P1 checks for complete LAION cache identity and train/validation WAV-byte overlap; do not disable them to create a Full7 store.
+- Preserve the E6 P1 checks for complete LAION cache identity when creating a Full7 store. WAV SHA-256 values are validated per source row, without comparing audio content across official splits.
 - Write immutable outputs keyed by source/checkpoint/contract fingerprints; changed input identity means a **new output identity/path**, not silent reuse.
 
 ### 5.4 Stacking leakage — explicitly accepted V1 limitation

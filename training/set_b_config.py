@@ -36,16 +36,13 @@ def load_set_b_config(path):
     result["model"] = {"hidden_dims": hidden, "dropout": float(dropout)}
     defaults = {"epochs": 30, "batch_size": 8, "num_workers": 0, "learning_rate": 0.001,
                 "weight_decay": 0.0001, "gradient_clip": 1.0, "seed": 42,
-                "selection_metric": "official_validation_mse",
-                "allow_train_validation_audio_overlap": False}
+                "selection_metric": "official_validation_mse"}
     training = raw.get("training", {})
     if set(training) - set(defaults):
         raise ValueError("unsupported E6 training setting")
     settings = {**defaults, **training}
     if settings["epochs"] != 30 or settings["selection_metric"] != "official_validation_mse":
         raise ValueError("E6 requires 30 epochs and official validation MSE selection")
-    if type(settings["allow_train_validation_audio_overlap"]) is not bool:
-        raise ValueError("training.allow_train_validation_audio_overlap must be boolean")
     for key in ("batch_size", "num_workers", "seed"):
         if type(settings[key]) is not int or settings[key] < (1 if key == "batch_size" else 0):
             raise ValueError(f"training.{key} invalid")

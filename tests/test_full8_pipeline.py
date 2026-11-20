@@ -317,14 +317,6 @@ def test_full8_train_score_audit_reports_all_eight_experts():
 
 
 def _full8_checkpoint_fixture():
-    from data.audio_overlap import build_train_validation_audio_overlap_diagnostic
-
-    train_records = [{"sample_id": "train:a.wav", "wav_sha256": "a" * 64}]
-    validation_records = [{"sample_id": "validation:b.wav", "wav_sha256": "b" * 64}]
-    diagnostic = build_train_validation_audio_overlap_diagnostic(
-        train_records, validation_records,
-        allow_train_validation_audio_overlap=False,
-    )
     identity = {
         "train": "c" * 64, "validation": "d" * 64,
         "preprocessing_contract": {"full8": "synthetic"},
@@ -334,11 +326,10 @@ def _full8_checkpoint_fixture():
         "source_sample_ids_by_split": {
             "train": ["train:a.wav"], "validation": ["validation:b.wav"],
         },
-        "audio_overlap_diagnostic": diagnostic,
         "score_review_policy": "EXPERIMENTAL_SKIPPED",
     }
     config = {"runtime": {"seed": 2027}, "data": {
-        "profile": "full_8", "allow_train_validation_audio_overlap": False,
+        "profile": "full_8",
         "score_review_policy": "EXPERIMENTAL_SKIPPED",
     }}
     provenance = {name: {"checkpoint_sha256": f"{index + 1:064x}"}
@@ -351,9 +342,10 @@ def _full8_checkpoint_fixture():
     return config, identity, provenance
 
 
-def test_full8_checkpoint_format5_provenance_and_resume_policy(tmp_path):
+def test_full8_checkpoint_format7_provenance_and_resume_policy(tmp_path):
     from training.checkpoint_manager import (
-        FULL8_CHECKPOINT_FORMAT_VERSION, MoeCheckpointManager, _validate_gate_payload,
+        FULL8_CHECKPOINT_FORMAT_VERSION, MoeCheckpointManager, _FULL8_PRE_OVERLAP_SOURCE_CODE_SHA256,
+        _fingerprint, _validate_gate_payload,
     )
 
     config, identity, provenance = _full8_checkpoint_fixture()
@@ -369,11 +361,11 @@ def test_full8_checkpoint_format5_provenance_and_resume_policy(tmp_path):
         best_srcc=0.42,
     )
     payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
-    assert payload["format_version"] == FULL8_CHECKPOINT_FORMAT_VERSION == 5
+    assert payload["format_version"] == FULL8_CHECKPOINT_FORMAT_VERSION == 7
     assert payload["expert_profile"] == "full_8"
     assert payload["expert_order"][-1] == "expert8"
     assert payload["gate_architecture"]["input_width"] == 33032
-    assert payload["feature_store_identity"]["audio_overlap_diagnostic"] == identity["audio_overlap_diagnostic"]
+    assert "audio_overlap_diagnostic" not in payload["feature_store_identity"]
     _validate_gate_payload(payload, gate)
     corrupt_source = dict(payload)
     corrupt_source["source_code_sha256"] = {**payload["source_code_sha256"], "data/full8_assembler.py": "0" * 64}
@@ -388,6 +380,34 @@ def test_full8_checkpoint_format5_provenance_and_resume_policy(tmp_path):
         expected_expert_checkpoint_provenance=provenance,
     )
     assert loaded["epoch"] == 1 and loaded["best_srcc"] == 0.42
+
+    historical = dict(payload)
+    historical["format_version"] = 5
+    historical["source_code_sha256"] = dict(_FULL8_PRE_OVERLAP_SOURCE_CODE_SHA256)
+    historical["config"] = {**payload["config"], "data": {
+        **payload["config"]["data"], "allow_train_validation_audio_overlap": False,
+    }}
+    historical["config_sha256"] = _fingerprint(historical["config"], "config")
+    historical["feature_store_identity"] = {
+        **payload["feature_store_identity"], "audio_overlap_diagnostic": {"historical": True},
+    }
+    historical["feature_store_identity_sha256"] = _fingerprint(
+        historical["feature_store_identity"], "feature_store_identity",
+    )
+    historical_path = tmp_path / "full8_format5_legacy.pt"
+    torch.save(historical, historical_path)
+    loaded_historical = manager.load_for_inference(
+        historical_path, gating_network=gate,
+        expected_expert_checkpoint_provenance=provenance,
+    )
+    assert loaded_historical["format_version"] == 5
+    with pytest.raises(ValueError, match="legacy Full7/Full8 gate checkpoint.*cannot resume"):
+        manager.load(
+            historical_path, gating_network=gate, optimizer=restored_optimizer,
+            scheduler=restored_scheduler, expected_config=historical["config"],
+            expected_feature_store_identity=historical["feature_store_identity"],
+            expected_expert_checkpoint_provenance=provenance,
+        )
 
     changed_config = {**config, "data": {**config["data"], "score_review_policy": "HUMAN_REVIEWED"}}
     changed_identity = {**identity, "score_review_policy": "HUMAN_REVIEWED",
@@ -421,7 +441,7 @@ def test_full8_config_is_independent_and_profile_checked(tmp_path):
     config_path.write_text(yaml.safe_dump(raw))
     loaded = load_moe_training_config(config_path)
     assert loaded["data"]["profile"] == "full_8"
-    assert loaded["data"]["allow_train_validation_audio_overlap"] is False
+    assert "allow_train_validation_audio_overlap" not in loaded["data"]
 
 
 def test_full8_experimental_review_bypass_runs_train_only_audit_without_review_file(monkeypatch, tmp_path):
@@ -450,7 +470,7 @@ def test_full8_experimental_review_bypass_runs_train_only_audit_without_review_f
         )
 
 
-def test_full8_builder_allows_only_configured_train_validation_overlap(monkeypatch, tmp_path):
+def test_full8_builder_assembles_all_splits_with_shared_wav_hashes(monkeypatch, tmp_path):
     import data.full8_assembler as assembler
 
     source_rows = {
@@ -469,21 +489,11 @@ def test_full8_builder_allows_only_configured_train_validation_overlap(monkeypat
         assembler, "build_full8_split",
         lambda *args, split, **kwargs: calls.append(split) or {"split": split},
     )
-    with pytest.raises(ValueError, match="duplicate WAV|overlap"):
-        assembler.build_full8_stores("base", "cache", tmp_path / "strict")
-    accepted = assembler.build_full8_stores(
-        "base", "cache", tmp_path / "experimental",
-        allow_train_validation_audio_overlap=True,
-    )
-    assert calls == ["train", "validation", "test"]
-    assert accepted["audio_overlap_diagnostic"]["overlapping_sha256_count"] == 1
-
     source_rows["test"] = [{"sample_id": "test:c.wav", "wav_sha256": "a" * 64}]
-    with pytest.raises(ValueError, match="involving official test"):
-        assembler.build_full8_stores(
-            "base", "cache", tmp_path / "bad_test",
-            allow_train_validation_audio_overlap=True,
-        )
+    accepted = assembler.build_full8_stores("base", "cache", tmp_path / "output")
+    assert calls == ["train", "validation", "test"]
+    assert accepted["status"] == "PASS"
+    assert "audio_overlap_diagnostic" not in accepted
 
 
 def test_full8_global_gate_trains_on_full_train_store_and_saves_loadable_checkpoint(tmp_path):
@@ -529,7 +539,7 @@ def test_full8_global_gate_trains_on_full_train_store_and_saves_loadable_checkpo
     config = {
         "runtime": {"device": "cpu", "seed": 2027},
         "data": {"feature_store_root": str(store_root), "profile": "full_8",
-                 "allow_train_validation_audio_overlap": False},
+                 },
         "output_dir": str(tmp_path / "gate"),
         "training": {
             "batch_size": 4, "max_epochs": 1, "learning_rate": 1e-5,
@@ -558,7 +568,7 @@ def test_full8_global_gate_trains_on_full_train_store_and_saves_loadable_checkpo
         report["best_checkpoint"], gating_network=gate,
         expected_expert_checkpoint_provenance=provenance,
     )
-    assert loaded["format_version"] == 5
+    assert loaded["format_version"] == 7
     from scripts.infer_moe_gating import infer_checkpoint
     inference = infer_checkpoint(
         config, report["best_checkpoint"], str(tmp_path / "full8_submission.csv"),

@@ -149,8 +149,7 @@ def test_build_full7_from_trusted_synthetic_heads(tmp_path):
     assert build_main(["--full9-root", str(full9), "--whisper-root", str(whisper),
                        "--e5-checkpoint", str(e5_path), "--e6-checkpoint", str(e6_path),
                        "--source-audio-root", str(tmp_path), "--output-root", str(tmp_path / "full7"),
-                       "--split", "train", "--split", "validation", "--split", "test",
-                       "--allow-train-validation-audio-overlap"]) == 0
+                       "--split", "train", "--split", "validation", "--split", "test"]) == 0
     assert not MoeFeatureStoreDataset(tmp_path / "full7", split="test")[0].get("label_raw")
 
     import yaml
@@ -160,7 +159,6 @@ def test_build_full7_from_trusted_synthetic_heads(tmp_path):
     config = yaml.safe_load((__import__("pathlib").Path(__file__).parents[1] /
                              "configs/moe_full7.example.yaml").read_text())
     config["data"]["feature_store_root"] = str(tmp_path / "full7")
-    config["data"]["allow_train_validation_audio_overlap"] = True
     config["output_dir"] = str(tmp_path / "run")
     config["runtime"]["device"] = "cpu"
     config["training"]["max_epochs"] = 1
@@ -179,11 +177,8 @@ def test_build_full7_from_trusted_synthetic_heads(tmp_path):
     assert run_manifest["human_review_performed"] is False
     assert run_manifest["run_purpose"] == "research_only"
     assert run_manifest["train_store_identity_sha256"] == store.identity
-    assert run_manifest["allow_train_validation_audio_overlap"] is True
-    assert run_manifest["audio_overlap_diagnostic"]["overlapping_sha256_count"] == 1
-    assert run_manifest["audio_overlap_diagnostic"]["affected_train_rows"] == 1
-    assert run_manifest["audio_overlap_diagnostic"]["affected_validation_rows"] == 1
-    assert "optimistically biased" in run_manifest["validation_warning"]
+    assert "allow_train_validation_audio_overlap" not in run_manifest
+    assert "audio_overlap_diagnostic" not in run_manifest
     project_root = Path(__file__).resolve().parents[1]
 
     git_status = subprocess.run(
@@ -203,7 +198,7 @@ def test_build_full7_from_trusted_synthetic_heads(tmp_path):
     assert checkpoint is not None
     evaluated = evaluate_checkpoint(config, checkpoint)
     assert evaluated["sample_count"] == 2
-    assert "optimistically biased" in evaluated["validation_metrics_warning"]
+    assert "validation_metrics_warning" not in evaluated
     submitted = infer_checkpoint(config, checkpoint, str(tmp_path / "submission.csv"))
     assert submitted["sample_count"] == 2
     assert (tmp_path / "submission.csv").read_text().splitlines()[0] == "wave_file_name,pred_score"
@@ -302,68 +297,32 @@ def test_full7_membership_tracks_official_validation_and_legacy_holdout(tmp_path
     ]
 
 
-def test_builder_cli_rejects_cross_split_duplicate_wav(tmp_path, capsys):
-    from scripts.build_full7_feature_store import main
-    payloads = [b"shared audio 1", b"shared audio 2"]
-    full9, whisper, _ = _sources(tmp_path, split="train", audio_payloads=payloads)
-    _sources(tmp_path, split="validation", audio_payloads=payloads)
-    code = main(["--full9-root", str(full9), "--whisper-root", str(whisper),
-                 "--e5-checkpoint", str(tmp_path / "e5.pt"),
-                 "--e6-checkpoint", str(tmp_path / "e6.pt"),
-                 "--output-root", str(tmp_path / "full7"),
-                 "--source-audio-root", str(tmp_path),
-                 "--split", "train"])
-    assert code == 1
-    assert "cross-split duplicate WAV" in capsys.readouterr().out
-    assert not (tmp_path / "full7" / "train" / "manifest.json").exists()
-
-
-def test_builder_cli_allows_train_validation_overlap_and_reports_full_diagnostic(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("duplicate_pair", [("train", "test"), ("validation", "test"),
+                                             ("train", "validation")])
+def test_builder_cli_accepts_duplicate_wav_across_any_official_splits(tmp_path, monkeypatch, duplicate_pair):
     from scripts import build_full7_feature_store as builder
 
-    payloads_train = [b"accepted shared WAV", b"train unique"]
-    full9, whisper, _ = _sources(tmp_path, split="train", audio_payloads=payloads_train)
-    _sources(tmp_path, split="validation", audio_payloads=[b"accepted shared WAV", b"validation unique"])
-    monkeypatch.setattr(builder, "build_full7_split", lambda *args, **kwargs: {
-        "split": kwargs["split"], "sample_count": 2,
-    })
+    for split in ("train", "validation", "test"):
+        if split in duplicate_pair:
+            payloads = [b"shared WAV bytes", f"{split} unique".encode()]
+        else:
+            payloads = [f"{split} unique 0".encode(), f"{split} unique 1".encode()]
+        full9, whisper, _ = _sources(tmp_path, split=split, audio_payloads=payloads)
+    built = []
+    monkeypatch.setattr(builder, "build_full7_split", lambda *args, **kwargs: (
+        built.append(kwargs["split"]) or {"split": kwargs["split"], "sample_count": 2}
+    ))
     report_path = tmp_path / "build-report.json"
     code = builder.main([
         "--full9-root", str(full9), "--whisper-root", str(whisper),
         "--e5-checkpoint", str(tmp_path / "e5.pt"), "--e6-checkpoint", str(tmp_path / "e6.pt"),
         "--output-root", str(tmp_path / "full7"), "--source-audio-root", str(tmp_path),
-        "--split", "train", "--allow-train-validation-audio-overlap",
+        "--split", "train", "--split", "validation", "--split", "test",
         "--report-json", str(report_path),
     ])
     assert code == 0
     report = json.loads(report_path.read_text())
-    diagnostic = report["audio_overlap_diagnostic"]
-    assert diagnostic["status"] == "WARNING"
-    assert diagnostic["overlapping_sha256_count"] == 1
-    assert diagnostic["affected_train_rows"] == diagnostic["affected_validation_rows"] == 1
-    assert diagnostic["overlaps"][0]["train_sample_ids"] == ["train:0.wav"]
-    assert diagnostic["overlaps"][0]["validation_sample_ids"] == ["validation:0.wav"]
-    assert "optimistically biased" in diagnostic["warning"]
-    assert "WARNING" in capsys.readouterr().out
-
-
-def test_builder_experimental_flag_never_allows_overlap_with_test(tmp_path, monkeypatch, capsys):
-    from scripts import build_full7_feature_store as builder
-
-    full9, whisper, _ = _sources(tmp_path, split="train", audio_payloads=[b"train-test duplicate", b"train unique"])
-    _sources(tmp_path, split="validation", audio_payloads=[b"validation unique 0", b"validation unique 1"])
-    _sources(tmp_path, split="test", audio_payloads=[b"train-test duplicate", b"test unique"])
-    monkeypatch.setattr(builder, "build_full7_split", lambda *args, **kwargs: pytest.fail("must reject before assembly"))
-    report_path = tmp_path / "failed-build.json"
-    code = builder.main([
-        "--full9-root", str(full9), "--whisper-root", str(whisper),
-        "--e5-checkpoint", str(tmp_path / "e5.pt"), "--e6-checkpoint", str(tmp_path / "e6.pt"),
-        "--output-root", str(tmp_path / "full7"), "--source-audio-root", str(tmp_path),
-        "--split", "train", "--allow-train-validation-audio-overlap",
-        "--report-json", str(report_path),
-    ])
-    assert code == 1
-    assert "test" in capsys.readouterr().out
-    report = json.loads(report_path.read_text())
-    assert report["test_overlap_diagnostic"]["overlapping_sha256_count"] == 1
-    assert report["test_overlap_diagnostic"]["overlaps"][0]["test_sample_ids"] == ["test:0.wav"]
+    assert built == ["train", "validation", "test"]
+    assert [row["sample_count"] for row in report["splits"]] == [2, 2, 2]
+    assert "audio_overlap_diagnostic" not in report
+    assert "test_overlap_diagnostic" not in report

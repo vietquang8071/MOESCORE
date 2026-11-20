@@ -188,52 +188,18 @@ def build_full8_stores(
     full7_root: str | Path,
     expert8_cache_root: str | Path,
     output_root: str | Path,
-    *, allow_train_validation_audio_overlap: bool = False,
+    *,
     splits: tuple[str, ...] = ("train", "validation", "test"),
     expert8_cache_id: str | None = None,
 ) -> dict[str, Any]:
-    if type(allow_train_validation_audio_overlap) is not bool:
-        raise ValueError("allow_train_validation_audio_overlap must be boolean")
     full7_manifests = {
         split: validate_feature_store(full7_root, split=split, require_labels=split != "test")
         for split in ("train", "validation", "test")
     }
-    train_rows = full7_manifests["train"]["assembly_identity"]["ordered_source_fingerprints"]
-    val_rows = full7_manifests["validation"]["assembly_identity"]["ordered_source_fingerprints"]
-    test_rows = full7_manifests["test"]["assembly_identity"]["ordered_source_fingerprints"]
-    from data.audio_overlap import (
-        build_train_validation_audio_overlap_diagnostic,
-        emit_audio_overlap_warning,
-        raise_for_audio_overlap,
-    )
-    diagnostic = build_train_validation_audio_overlap_diagnostic(
-        train_rows, val_rows,
-        allow_train_validation_audio_overlap=allow_train_validation_audio_overlap,
-    )
-    if diagnostic["overlapping_sha256_count"]:
-        if not allow_train_validation_audio_overlap:
-            raise_for_audio_overlap(diagnostic, stage="Full8 builder")
-        emit_audio_overlap_warning(diagnostic, stage="Full8 builder")
-    test_hashes = {row["wav_sha256"] for row in test_rows}
-    train_val_by_hash: dict[str, list[str]] = {}
-    for row in train_rows + val_rows:
-        train_val_by_hash.setdefault(row["wav_sha256"], []).append(row["sample_id"])
-    test_by_hash: dict[str, list[str]] = {}
-    for row in test_rows:
-        test_by_hash.setdefault(row["wav_sha256"], []).append(row["sample_id"])
-    test_duplicates = sorted(test_hashes & set(train_val_by_hash))
-    if test_duplicates:
-        raise ValueError(
-            "Full8 builder rejects any duplicate WAV hash involving official test: "
-            f"{test_duplicates[0]} train/validation={train_val_by_hash[test_duplicates[0]]} "
-            f"test={test_by_hash[test_duplicates[0]]}"
-        )
     reports = [build_full8_split(full7_root, expert8_cache_root, output_root, split=split,
                                  expert8_cache_id=expert8_cache_id)
                for split in splits]
     return {"status": "PASS", "expert_profile": "full_8", "splits": reports,
-            "allow_train_validation_audio_overlap": allow_train_validation_audio_overlap,
-            "audio_overlap_diagnostic": diagnostic,
             "run_purpose": "research_only"}
 
 

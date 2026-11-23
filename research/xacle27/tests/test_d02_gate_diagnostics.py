@@ -236,8 +236,9 @@ class D02GateDiagnosticsTests(unittest.TestCase):
         module = ast.Module(body=[finder], type_ignores=[])
         with tempfile.TemporaryDirectory() as temporary:
             input_root = Path(temporary)
-            recovery = input_root / "recovery"
-            recovery.mkdir()
+            recovery = input_root / "datasets" / "qnv8071" / "recovery"
+            recovery.mkdir(parents=True)
+            (recovery / "recovery").mkdir()
             namespace = {"KAGGLE_INPUT": input_root, "Path": Path}
             exec(compile(module, str(path), "exec"), namespace)
             self.assertEqual(

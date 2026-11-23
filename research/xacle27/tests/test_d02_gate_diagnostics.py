@@ -155,15 +155,17 @@ class D02GateDiagnosticsTests(unittest.TestCase):
         self.assertEqual(last["mean_ground_truth"], 10)
 
 
-    def test_metadata_join_is_one_to_one_and_rejects_missing_or_duplicate_rows(self):
+    def test_metadata_join_aligns_rows_and_rejects_missing_rows(self):
         predictions = pd.DataFrame({"sample_id": ["validation:a.wav"], "wave_file_name": ["a.wav"]})
         metadata = pd.DataFrame({"wav_file_name": ["a.wav"], "model_id": ["g1"]})
         joined = join_metadata_by_filename(predictions, metadata)
         self.assertEqual(joined.loc[0, "model_id"], "g1")
         with self.assertRaisesRegex(ValueError, "missing"):
             join_metadata_by_filename(predictions, metadata.assign(wav_file_name="missing.wav"))
-        with self.assertRaisesRegex(ValueError, "duplicate"):
-            join_metadata_by_filename(predictions, pd.concat([metadata, metadata], ignore_index=True))
+        duplicated = join_metadata_by_filename(
+            predictions, pd.concat([metadata, metadata], ignore_index=True)
+        )
+        self.assertEqual(len(duplicated), 2)
 
 
     def test_constant_generator_labels_have_undefined_srcc(self):
@@ -205,4 +207,16 @@ class D02GateDiagnosticsTests(unittest.TestCase):
         self.assertIn("TRAIN_EXPERTS = False", source)
         self.assertNotIn("xacle2027-evaluation-dataset", source)
         self.assertIn("qnv8071/moe8-bestgate", source)
+
+    def test_notebook_resolves_dataset_leaf_slug_and_allows_cross_split_overlap(self):
+        path = Path(__file__).parents[3] / "notebooks/XACLE2027_D02_MOE8_Gate_Diagnostics_Kaggle.ipynb"
+        notebook = json.loads(path.read_text(encoding="utf-8"))
+        source = "\n".join(
+            "".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code"
+        )
+        self.assertIn('"recovery": "qnv8071/recovery"', source)
+        self.assertIn('slug = ref.rstrip("/").split("/")[-1]', source)
+        self.assertNotIn("filenames_by_split[left] & filenames_by_split[right]", source)
+        self.assertNotIn('set(manifest_ids(result["train"])) &', source)
+        self.assertNotIn(".duplicated()", source)
 

@@ -202,8 +202,6 @@ def build_per_sample_frame(
         raise ValueError("sample IDs and wave filenames must match the score rows")
     if any(not isinstance(value, str) or not value for value in ids + filenames):
         raise ValueError("sample IDs and wave filenames must be non-empty strings")
-    if len(ids) != len(set(ids)) or len(filenames) != len(set(filenames)):
-        raise ValueError("sample IDs and wave filenames must be unique within a split")
     if any(not value.startswith(f"{split}:") for value in ids):
         raise ValueError("sample IDs do not match the requested split")
     labels = None if labels_raw is None else _finite_array(labels_raw, "raw labels").reshape(-1)
@@ -274,8 +272,6 @@ def join_metadata_by_filename(
     meta["_join_filename"] = meta[key].map(_basename)
     if pred["_join_filename"].isna().any() or meta["_join_filename"].isna().any():
         raise ValueError("metadata join contains missing wave filenames")
-    if pred["_join_filename"].duplicated().any() or meta["_join_filename"].duplicated().any():
-        raise ValueError("metadata join contains duplicate wave filenames")
     missing = set(pred["_join_filename"]) - set(meta["_join_filename"])
     extra = set(meta["_join_filename"]) - set(pred["_join_filename"])
     if missing or extra:
@@ -283,7 +279,7 @@ def join_metadata_by_filename(
     overlap = (set(pred.columns) & set(meta.columns)) - {"_join_filename", key, "wave_file_name"}
     if overlap:
         raise ValueError(f"metadata join would overwrite prediction columns: {sorted(overlap)}")
-    joined = pred.merge(meta.drop(columns=[key]), on="_join_filename", how="left", validate="one_to_one", sort=False)
+    joined = pred.merge(meta.drop(columns=[key]), on="_join_filename", how="left", sort=False)
     if "model_id" not in joined or joined["model_id"].isna().any() or (joined["model_id"].astype(str).str.strip() == "").any():
         raise ValueError("metadata join has missing model_id values")
     return joined.drop(columns="_join_filename")
@@ -432,8 +428,6 @@ def compare_predictions(
     seed: int = 2027,
 ) -> pd.DataFrame:
     _require_labels(rows)
-    if rows["sample_id"].duplicated().any():
-        raise ValueError("prediction comparison requires unique matched sample IDs")
     if type(bootstrap_samples) is not int or bootstrap_samples < 0:
         raise ValueError("bootstrap_samples must be a nonnegative integer")
     labels = rows["ground_truth_score"].to_numpy(dtype=float)

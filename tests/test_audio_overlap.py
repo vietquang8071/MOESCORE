@@ -3,7 +3,11 @@ import json
 
 import pytest
 
-from data.audio_overlap import build_train_validation_audio_overlap_diagnostic
+from data.audio_overlap import (
+    build_public_split_audio_overlap_diagnostic,
+    build_train_validation_audio_overlap_diagnostic,
+    raise_for_public_split_audio_overlap,
+)
 
 
 def test_audio_overlap_diagnostic_is_complete_and_deterministic():
@@ -79,3 +83,54 @@ def test_audio_overlap_diagnostic_rejects_invalid_hashes_and_duplicate_ids(recor
         build_train_validation_audio_overlap_diagnostic(
             records, [], allow_train_validation_audio_overlap=True,
         )
+
+
+def test_public_split_diagnostic_records_every_pair_hash_and_sample_id_without_mutation():
+    records = {
+        "train": [
+            {"sample_id": "train:0.wav", "wav_sha256": "a" * 64},
+            {"sample_id": "train:1.wav", "wav_sha256": "b" * 64},
+            {"sample_id": "train:2.wav", "wav_sha256": "d" * 64},
+            {"sample_id": "train:unique.wav", "wav_sha256": "e" * 64},
+        ],
+        "validation": [
+            {"sample_id": "validation:0.wav", "wav_sha256": "a" * 64},
+            {"sample_id": "validation:2.wav", "wav_sha256": "c" * 64},
+            {"sample_id": "validation:3.wav", "wav_sha256": "d" * 64},
+        ],
+        "test": [
+            {"sample_id": "test:1.wav", "wav_sha256": "b" * 64},
+            {"sample_id": "test:2.wav", "wav_sha256": "c" * 64},
+            {"sample_id": "test:3.wav", "wav_sha256": "d" * 64},
+        ],
+    }
+    original = json.loads(json.dumps(records))
+    diagnostic = build_public_split_audio_overlap_diagnostic(
+        records, allow_public_split_audio_overlap=True,
+        allow_train_validation_audio_overlap=True,
+    )
+    assert records == original
+    assert diagnostic["status"] == "WARNING"
+    assert diagnostic["total_overlapping_sha256_groups"] == 4
+    assert diagnostic["pair_overlap_group_counts"] == {
+        "train_validation": 2, "train_test": 2, "validation_test": 2,
+    }
+    assert [row["wav_sha256"] for row in diagnostic["overlaps"]] == ["a" * 64, "b" * 64, "c" * 64, "d" * 64]
+    triple = diagnostic["overlaps"][-1]
+    assert triple["sample_ids_by_split"] == {
+        "train": ["train:2.wav"], "validation": ["validation:3.wav"], "test": ["test:3.wav"],
+    }
+    assert "may bias evaluation" in diagnostic["warning"]
+
+
+def test_public_split_default_is_strict_for_train_test_duplicates():
+    records = {
+        "train": [{"sample_id": "train:a.wav", "wav_sha256": "a" * 64}],
+        "validation": [{"sample_id": "validation:b.wav", "wav_sha256": "b" * 64}],
+        "test": [{"sample_id": "test:c.wav", "wav_sha256": "a" * 64}],
+    }
+    diagnostic = build_public_split_audio_overlap_diagnostic(records)
+    assert diagnostic["status"] == "ERROR"
+    assert diagnostic["pair_overlap_group_counts"]["train_test"] == 1
+    with pytest.raises(ValueError, match="test"):
+        raise_for_public_split_audio_overlap(diagnostic, stage="Full7 builder")

@@ -16,9 +16,12 @@ from data.full7_assembler import build_full7_split
 from data.set_a_cached_dataset import _read_source_manifest
 from data.moe_feature_store import validate_feature_store
 from data.audio_overlap import (
+    build_public_split_audio_overlap_diagnostic,
     build_train_validation_audio_overlap_diagnostic,
     emit_audio_overlap_warning,
+    emit_public_split_audio_overlap_warning,
     raise_for_audio_overlap,
+    raise_for_public_split_audio_overlap,
     validate_source_audio_records,
 )
 
@@ -37,8 +40,11 @@ def main(argv=None) -> int:
     parser.add_argument("--report-json")
     parser.add_argument("--allow-train-validation-audio-overlap", action="store_true",
                         help="Allow identical WAV hashes between train and validation only (experimental)")
+    parser.add_argument("--allow-public-split-audio-overlap", action="store_true",
+                        help="D01 diagnostic-only: retain and allow identical WAV hashes across official public splits")
     args = parser.parse_args(argv)
     overlap_diagnostic = None
+    public_split_overlap_diagnostic = None
     test_overlap_diagnostic = {"overlapping_sha256_count": 0, "overlaps": []}
     try:
         splits = list(dict.fromkeys(args.split))
@@ -53,12 +59,18 @@ def main(argv=None) -> int:
             records_by_split[split] = validate_source_audio_records(records, split=split)
         overlap_diagnostic = build_train_validation_audio_overlap_diagnostic(
             records_by_split.get("train", []), records_by_split.get("validation", []),
-            allow_train_validation_audio_overlap=args.allow_train_validation_audio_overlap,
+            allow_train_validation_audio_overlap=(args.allow_train_validation_audio_overlap
+                                                  or args.allow_public_split_audio_overlap),
         )
         if overlap_diagnostic["overlapping_sha256_count"]:
-            if not args.allow_train_validation_audio_overlap:
+            if not (args.allow_train_validation_audio_overlap or args.allow_public_split_audio_overlap):
                 raise_for_audio_overlap(overlap_diagnostic, stage="Full7 builder")
             emit_audio_overlap_warning(overlap_diagnostic, stage="Full7 builder")
+        public_split_overlap_diagnostic = build_public_split_audio_overlap_diagnostic(
+            {split: records_by_split.get(split, []) for split in ("train", "validation", "test")},
+            allow_public_split_audio_overlap=args.allow_public_split_audio_overlap,
+            allow_train_validation_audio_overlap=args.allow_train_validation_audio_overlap,
+        )
         test_records = records_by_split.get("test", [])
         if test_records:
             test_by_hash = {}
@@ -78,12 +90,17 @@ def main(argv=None) -> int:
                         "test_sample_ids": sorted(test_by_hash[digest]),
                     } for digest in shared_test],
                 }
-                digest = shared_test[0]
-                raise ValueError(
-                    "cross-split duplicate WAV SHA-256 involving test: "
-                    f"wav_sha256={digest}, train_or_validation={train_validation_by_hash[digest]}, "
-                    f"test={test_by_hash[digest]}"
-                )
+                if not args.allow_public_split_audio_overlap:
+                    digest = shared_test[0]
+                    raise ValueError(
+                        "cross-split duplicate WAV SHA-256 involving test: "
+                        f"wav_sha256={digest}, train_or_validation={train_validation_by_hash[digest]}, "
+                        f"test={test_by_hash[digest]}"
+                    )
+        if public_split_overlap_diagnostic["status"] == "ERROR":
+            raise_for_public_split_audio_overlap(public_split_overlap_diagnostic, stage="Full7 builder")
+        if public_split_overlap_diagnostic["status"] == "WARNING":
+            emit_public_split_audio_overlap_warning(public_split_overlap_diagnostic, stage="Full7 builder")
         reports = []
         for split in splits:
             audio_dir = Path(args.source_audio_root) / split
@@ -95,11 +112,18 @@ def main(argv=None) -> int:
                            shard_size=args.shard_size))
         report = {"status": "PASS", "splits": reports,
                   "audio_overlap_diagnostic": overlap_diagnostic,
-                  "test_overlap_diagnostic": test_overlap_diagnostic}
+                  "test_overlap_diagnostic": test_overlap_diagnostic,
+                  "public_split_audio_overlap_diagnostic": public_split_overlap_diagnostic,
+                  "allow_public_split_audio_overlap": args.allow_public_split_audio_overlap,
+                  "public_split_audio_overlap_override": args.allow_public_split_audio_overlap}
     except Exception as exc:
         report = {"status": "FAIL", "error": f"{type(exc).__name__}: {exc}"}
         if overlap_diagnostic is not None:
             report["audio_overlap_diagnostic"] = overlap_diagnostic
+        if public_split_overlap_diagnostic is not None:
+            report["public_split_audio_overlap_diagnostic"] = public_split_overlap_diagnostic
+        report["allow_public_split_audio_overlap"] = args.allow_public_split_audio_overlap
+        report["public_split_audio_overlap_override"] = args.allow_public_split_audio_overlap
         if test_overlap_diagnostic["overlapping_sha256_count"]:
             report["test_overlap_diagnostic"] = test_overlap_diagnostic
     body = json.dumps(report, indent=2, ensure_ascii=False)

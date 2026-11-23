@@ -1,0 +1,22 @@
+{
+  "id": "qnv8071/xacle-2027-d01-moe8-convex-envelope-diagnostics",
+  "title": "XACLE 2027 - D01 MOE8 Convex Envelope Diagnostics",
+  "code_file": "XACLE2027_D01_MOE8_Kaggle.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_tpu": "false",
+  "enable_internet": "true",
+  "machine_shape": "NvidiaTeslaT4",
+  "dataset_sources": [
+    "qnv8071/moe8-bestgate",
+    "qnv8071/moescore-full9-feature-cache",
+    "qnv8071/recovery",
+    "qnv8071/xacle-2027-data",
+    "qnv8071/xacle-weights"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

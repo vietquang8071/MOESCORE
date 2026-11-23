@@ -479,11 +479,21 @@ def test_full8_builder_allows_only_configured_train_validation_overlap(monkeypat
     assert accepted["audio_overlap_diagnostic"]["overlapping_sha256_count"] == 1
 
     source_rows["test"] = [{"sample_id": "test:c.wav", "wav_sha256": "a" * 64}]
-    with pytest.raises(ValueError, match="involving official test"):
+    with pytest.raises(ValueError, match="public split source audio overlap|involving official test"):
         assembler.build_full8_stores(
             "base", "cache", tmp_path / "bad_test",
             allow_train_validation_audio_overlap=True,
         )
+    diagnostic_only = assembler.build_full8_stores(
+        "base", "cache", tmp_path / "diagnostic_public_overlap",
+        allow_public_split_audio_overlap=True,
+    )
+    assert calls == ["train", "validation", "test"] * 2
+    assert diagnostic_only["audio_overlap_diagnostic"]["overlapping_sha256_count"] == 1
+    assert diagnostic_only["public_split_audio_overlap_diagnostic"]["total_overlapping_sha256_groups"] == 1
+    assert diagnostic_only["public_split_audio_overlap_diagnostic"]["pair_overlap_group_counts"] == {
+        "train_validation": 1, "train_test": 1, "validation_test": 1,
+    }
 
 
 def test_full8_global_gate_trains_on_full_train_store_and_saves_loadable_checkpoint(tmp_path):

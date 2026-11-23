@@ -226,6 +226,9 @@ class D02GateDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("filenames_by_split[left] & filenames_by_split[right]", source)
         self.assertNotIn('set(manifest_ids(result["train"])) &', source)
         self.assertNotIn(".duplicated()", source)
+        self.assertEqual(source.count('cmd.append("--allow-train-validation-audio-overlap")'), 2)
+        self.assertEqual(source.count('cmd.append("--allow-public-split-audio-overlap")'), 2)
+        self.assertNotIn("if overlap_allowed:", source)
 
     def test_dataset_root_finder_handles_repeated_slug_and_reports_missing_mounts(self):
         path = Path(__file__).parents[3] / "notebooks/XACLE2027_D02_MOE8_Gate_Diagnostics_Kaggle.ipynb"

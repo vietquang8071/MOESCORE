@@ -1,6 +1,11 @@
 import ast
+import contextlib
+import io
 import json
 from pathlib import Path
+import shlex
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -245,4 +250,57 @@ class D02GateDiagnosticsTests(unittest.TestCase):
                 namespace["find_dataset_root"]("qnv8071/recovery/recovery"),
                 recovery.resolve(),
             )
+
+    def test_notebook_downloads_pinned_bert_and_reports_all_subprocess_output(self):
+        path = Path(__file__).parents[3] / "notebooks/XACLE2027_D02_MOE8_Gate_Diagnostics_Kaggle.ipynb"
+        notebook = json.loads(path.read_text(encoding="utf-8"))
+        source = "\n".join(
+            "".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code"
+        )
+        self.assertIn('BERT_REVISION = "86b5e0934494bd15c9632b12f734a8a67f723594"', source)
+        self.assertIn("snapshot_download(", source)
+        self.assertIn("force_download=True", source)
+        self.assertIn('"offline": False', source)
+        self.assertIn("capture_output=True", source)
+        self.assertIn("result.stdout", source)
+        self.assertIn("result.stderr", source)
+        self.assertIn("CalledProcessError", source)
+        self.assertEqual(source.count("subprocess.run("), 1)
+        self.assertNotIn("hf_text_cache", source)
+
+    def test_subprocess_helper_prints_success_failure_and_launch_errors(self):
+        path = Path(__file__).parents[3] / "notebooks/XACLE2027_D02_MOE8_Gate_Diagnostics_Kaggle.ipynb"
+        notebook = json.loads(path.read_text(encoding="utf-8"))
+        code = next(
+            "".join(cell["source"])
+            for cell in notebook["cells"]
+            if cell["cell_type"] == "code" and "def run_subprocess(command" in "".join(cell["source"])
+        )
+        parsed = ast.parse(code)
+        helper = next(node for node in parsed.body if isinstance(node, ast.FunctionDef)
+                      and node.name == "run_subprocess")
+        module = ast.Module(body=[helper], type_ignores=[])
+        namespace = {"subprocess": subprocess, "shlex": shlex, "sys": sys, "Path": Path}
+        exec(compile(module, str(path), "exec"), namespace)
+        run_subprocess = namespace["run_subprocess"]
+        with tempfile.TemporaryDirectory() as temporary:
+            stdout, stderr = io.StringIO(), io.StringIO()
+            log_path = Path(temporary) / "command.log"
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                run_subprocess([sys.executable, "-c", "print('visible output')"], log_path=log_path)
+            self.assertIn("visible output", stdout.getvalue())
+            self.assertIn("visible output", log_path.read_text())
+
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    run_subprocess([sys.executable, "-c", "import sys; print('command error', file=sys.stderr); sys.exit(2)"])
+            self.assertIn("command error", stderr.getvalue())
+            self.assertIn("exit code 2", stderr.getvalue())
+
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+                with self.assertRaises(FileNotFoundError):
+                    run_subprocess([str(Path(temporary) / "missing-command")])
+            self.assertIn("could not start", stderr.getvalue().lower())
 

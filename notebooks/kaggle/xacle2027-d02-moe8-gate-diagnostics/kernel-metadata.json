@@ -14,8 +14,7 @@
     "qnv8071/recovery",
     "qnv8071/xacle-weights",
     "qnv8071/xacle-2027-data",
-    "qnv8071/moescore-full9-feature-cache",
-    "qnv8071/moescore-hf-text-cache-v2"
+    "qnv8071/moescore-full9-feature-cache"
   ],
   "competition_sources": [],
   "kernel_sources": [],

@@ -1,5 +1,7 @@
+import ast
 import json
 from pathlib import Path
+import tempfile
 import unittest
 
 import numpy as np
@@ -219,4 +221,27 @@ class D02GateDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("filenames_by_split[left] & filenames_by_split[right]", source)
         self.assertNotIn('set(manifest_ids(result["train"])) &', source)
         self.assertNotIn(".duplicated()", source)
+
+    def test_dataset_root_finder_handles_repeated_slug_and_reports_missing_mounts(self):
+        path = Path(__file__).parents[3] / "notebooks/XACLE2027_D02_MOE8_Gate_Diagnostics_Kaggle.ipynb"
+        notebook = json.loads(path.read_text(encoding="utf-8"))
+        code = next(
+            "".join(cell["source"])
+            for cell in notebook["cells"]
+            if cell["cell_type"] == "code" and "def find_dataset_root(ref):" in "".join(cell["source"])
+        )
+        parsed = ast.parse(code)
+        finder = next(node for node in parsed.body if isinstance(node, ast.FunctionDef)
+                      and node.name == "find_dataset_root")
+        module = ast.Module(body=[finder], type_ignores=[])
+        with tempfile.TemporaryDirectory() as temporary:
+            input_root = Path(temporary)
+            recovery = input_root / "recovery"
+            recovery.mkdir()
+            namespace = {"KAGGLE_INPUT": input_root, "Path": Path}
+            exec(compile(module, str(path), "exec"), namespace)
+            self.assertEqual(
+                namespace["find_dataset_root"]("qnv8071/recovery/recovery"),
+                recovery.resolve(),
+            )
 

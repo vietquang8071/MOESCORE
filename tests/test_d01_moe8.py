@@ -165,6 +165,26 @@ class D01Moe8Tests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "inference source code is incompatible"):
             prepare_format7_gate_payload(payload, current_source_hashes=current)
 
+    def test_format7_gate_keeps_checkpoint_source_validation_with_runtime_loader_patch(self):
+        payload, baseline = self._format7_payload()
+        runtime = dict(baseline)
+        runtime["model/expert_adapters/expert8_m2d_clap_adapter.py"] = "f" * 64
+        _, _, audit, _ = prepare_format7_gate_payload(
+            payload, current_source_hashes=runtime,
+            checkpoint_compat_source_hashes=baseline,
+        )
+        self.assertIn(
+            "model/expert_adapters/expert8_m2d_clap_adapter.py",
+            audit["different_or_unavailable_files"],
+        )
+        bad_baseline = dict(baseline)
+        bad_baseline["model/moe_gating_core.py"] = "e" * 64
+        with self.assertRaisesRegex(ValueError, "inference source code is incompatible"):
+            prepare_format7_gate_payload(
+                payload, current_source_hashes=runtime,
+                checkpoint_compat_source_hashes=bad_baseline,
+            )
+
     def test_kaggle_notebook_is_public_only_and_diagnostic_scoped(self):
         root = Path(__file__).resolve().parents[1]
         notebook = json.loads((root / "notebooks/XACLE2027_D01_MOE8_Kaggle.ipynb").read_text())
@@ -177,6 +197,7 @@ class D01Moe8Tests(unittest.TestCase):
         self.assertNotIn('len({m["source_manifest_sha256"] for m in result.values()})', cells)
         self.assertEqual(metadata["id"], "qnv8071/xacle-2027-d01-moe8-convex-envelope-diagnostics")
         self.assertEqual(metadata["is_private"], "true")
+        self.assertEqual(metadata.get("enable_internet"), "true")
         self.assertEqual(set(metadata["dataset_sources"]), {
             "qnv8071/moe8-bestgate", "qnv8071/recovery", "qnv8071/xacle-weights",
             "qnv8071/xacle-2027-data", "qnv8071/moescore-full9-feature-cache",
@@ -185,6 +206,36 @@ class D01Moe8Tests(unittest.TestCase):
         full8_notebook = json.loads((root / "notebooks/MOESCORE_Full8_T4x2_Kaggle.ipynb").read_text())
         full8_text = "\n".join("".join(cell.get("source", [])) for cell in full8_notebook["cells"])
         self.assertNotIn('len({m["source_manifest_sha256"] for m in manifests.values()})', full8_text)
+
+    def test_kaggle_bert_preflight_downloads_and_loads_the_local_model_before_feature_work(self):
+        root = Path(__file__).resolve().parents[1]
+        notebook = json.loads((root / "notebooks/XACLE2027_D01_MOE8_Kaggle.ipynb").read_text())
+        cells = ["".join(cell.get("source", [])) for cell in notebook["cells"]]
+        combined = "\n".join(cells)
+        resource_source = (root / "scripts/expert8_text_resource.py").read_text()
+        self.assertIn('WORK / "models/bert-base-uncased"', combined)
+        self.assertIn('EXPERT8_TEXT_MODEL_ID = "google-bert/bert-base-uncased"', resource_source)
+        self.assertIn("prepare_expert8_text_resource", combined)
+        self.assertIn("snapshot_download", resource_source)
+        self.assertIn("AutoTokenizer.from_pretrained(str(target), local_files_only=True)", resource_source)
+        self.assertIn("AutoModel.from_pretrained(str(target), local_files_only=True)", resource_source)
+        self.assertIn("expert8_cache_text_resource_matches", combined)
+        adapter_source = (root / "model/expert_adapters/expert8_m2d_clap_adapter.py").read_text()
+        portable_source = (root / "expert3_finetune/XACLE_2027_baselinemodel/models/m2d/vendor/portable_m2d.py").read_text()
+        self.assertIn("get_clap_text_encoder(text_model_dir=str(text_model_dir))", adapter_source)
+        self.assertIn("AutoTokenizer.from_pretrained(clip_weight, local_files_only=True)", portable_source)
+        self.assertIn("AutoModel.from_pretrained(clip_weight, local_files_only=True)", portable_source)
+        self.assertNotIn("hf_e8_cache", combined)
+        preflight_cell = next(i for i, source in enumerate(cells)
+                              if "prepare_expert8_text_resource(BERT_MODEL_DIR)" in source)
+        full7_cell = next(i for i, source in enumerate(cells) if "full7_cmd = [" in source)
+        e8_cell = next(i for i, source in enumerate(cells) if "e8_cmd = [sys.executable" in source)
+        self.assertLess(preflight_cell, full7_cell)
+        self.assertLess(preflight_cell, e8_cell)
+        self.assertIn('"text_model_dir": str(BERT_MODEL_DIR)', combined)
+        self.assertIn('"offline": True', combined)
+        self.assertIn('GATE_SOURCE_COMPAT_COMMIT = "2e6c247563b554116017c5f8630cda7ae257bc59"', cells[2])
+        self.assertIn('checkpoint_compat_source_hashes=GATE_CHECKPOINT_COMPAT_SOURCE_HASHES', cells[10])
         packaged = json.loads((root / "kaggle/d01_moe8/XACLE2027_D01_MOE8_Kaggle.ipynb").read_text())
         self.assertEqual(packaged, notebook)
 

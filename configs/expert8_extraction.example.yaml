@@ -1,9 +1,12 @@
 runtime:
   device: cuda:0
   offline: true
-  cache_dir: ../hf_cache
 experts:
   expert8:
     # Replace these paths in the caller's generated Kaggle config.
     base_checkpoint: ../weights/pretrained/checkpoint-30.pth
     finetuned_checkpoint: ../weights/m2d-lora-Nam.pt
+    text_model_dir: ../models/bert-base-uncased
+    text_model_repo_id: google-bert/bert-base-uncased
+    # The D01 preflight resolves and fills this commit SHA after snapshot_download.
+    text_model_revision: null

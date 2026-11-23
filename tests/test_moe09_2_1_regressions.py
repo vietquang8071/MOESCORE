@@ -49,6 +49,9 @@ def _cache_identity_project_fixture(root: Path) -> Path:
         "model/expert_adapters/m2d_lora_runtime.py",
         "model/expert_adapters/expert1_adapter.py",
         "model/expert_adapters/top2_laion_adapter.py",
+        "model/expert_adapters/expert8_m2d_clap_adapter.py",
+        "model/expert_adapters/expert8_m2d_clap_runtime.py",
+        "scripts/expert8_text_resource.py",
     )
     for relative in files:
         _copy_file(ROOT, project, relative)
@@ -192,6 +195,57 @@ class M2DLoRACacheIdentityRegressionTests(unittest.TestCase):
                 "expert3_finetune/XACLE_2027_baselinemodel/models/m2d/vendor/portable_m2d.py",
                 m2d_after["implementation_provenance"],
             )
+
+    def test_expert8_identity_hashes_local_bert_without_hub_cache(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = _cache_identity_project_fixture(root)
+            checkpoint_root = root / "checkpoints"
+            checkpoint_root.mkdir()
+            base = checkpoint_root / "checkpoint-30.pth"
+            finetuned = checkpoint_root / "expert8-best.pt"
+            base.write_bytes(b"frozen M2D checkpoint")
+            finetuned.write_bytes(b"frozen E8 LoRA checkpoint")
+            model_dir = root / "models" / "bert-base-uncased"
+            model_dir.mkdir(parents=True)
+            for name, value in {
+                "config.json": '{"model_type":"bert"}',
+                "tokenizer_config.json": '{"do_lower_case":true}',
+                "tokenizer.json": '{"fixture":true}',
+                "vocab.txt": "[PAD]\n[UNK]\n",
+                "model.safetensors": "local frozen weights",
+            }.items():
+                (model_dir / name).write_text(value, encoding="utf-8")
+            config = {
+                "runtime": {"device": "cpu", "cache_dir": str(root / "empty-hub-cache")},
+                "experts": {"expert8": {
+                    "base_checkpoint": str(base), "finetuned_checkpoint": str(finetuned),
+                    "text_model_dir": str(model_dir),
+                    "text_model_repo_id": M2D_TEXT_MODEL_ID,
+                    "text_model_revision": "a" * 40,
+                }},
+            }
+            with (
+                patch.object(extraction, "PROJECT_ROOT", project),
+                patch.object(extraction, "_TEXT_SNAPSHOT_CACHE", {}),
+                patch.dict(os.environ, {"HF_HOME": "", "HF_HUB_CACHE": ""}),
+                patch("pathlib.Path.home", return_value=root / "empty-home"),
+            ):
+                before = compute_expert_cache_identity("expert8", config, feature_dim=3073, device="cpu")
+                (model_dir / "model.safetensors").write_text("changed local weights", encoding="utf-8")
+                after = compute_expert_cache_identity("expert8", config, feature_dim=3073, device="cpu")
+
+            resource = before["relevant_dependencies"]["text_encoder_tokenizer_resources"]["expert8_text_model"]
+            self.assertEqual(resource["original_huggingface_repo_id"], M2D_TEXT_MODEL_ID)
+            self.assertEqual(resource["resolved_revision"], "a" * 40)
+            self.assertEqual(resource["model_directory"], str(model_dir.resolve()))
+            self.assertEqual(set(resource["files_sha256"]), {
+                "config.json", "tokenizer_config.json", "tokenizer.json", "vocab.txt", "model.safetensors",
+            })
+            self.assertIn("scripts/expert8_text_resource.py", before["implementation_provenance"])
+            self.assertNotEqual(before["cache_id"], after["cache_id"])
+            self.assertNotIn("expert8", _TEXT_RESOURCE_IDS)
+            self.assertEqual(_TEXT_RESOURCE_IDS["m2d_lora"], (M2D_TEXT_MODEL_ID,))
 
     def test_selected_bert_snapshot_content_and_revision_change_m2d_identity(self):
         with tempfile.TemporaryDirectory() as temporary:

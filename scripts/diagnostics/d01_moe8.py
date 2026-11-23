@@ -47,6 +47,7 @@ FULL8_GATE_ARCHITECTURE = {
 
 def prepare_format7_gate_payload(
     payload: Mapping[str, Any], *, current_source_hashes: Mapping[str, str],
+    checkpoint_compat_source_hashes: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
     """Adapt the released Full8-v7 inference metadata to the pinned v5 validator."""
     if not isinstance(payload, Mapping) or payload.get("format_version") != FULL8_INFERENCE_COMPAT_FORMAT_VERSION:
@@ -67,9 +68,11 @@ def prepare_format7_gate_payload(
         if (not isinstance(name, str) or not isinstance(digest, str) or len(digest) != 64
                 or any(char not in "0123456789abcdef" for char in digest)):
             raise ValueError("Full8 format-7 checkpoint source-code provenance is malformed")
+    compatibility_source = (current_source_hashes if checkpoint_compat_source_hashes is None
+                            else checkpoint_compat_source_hashes)
     missing = [name for name in FULL8_INFERENCE_COMPAT_SOURCE_FILES if name not in recorded_source]
     changed = [name for name in FULL8_INFERENCE_COMPAT_SOURCE_FILES
-               if name in recorded_source and recorded_source[name] != current_source_hashes.get(name)]
+               if name in recorded_source and recorded_source[name] != compatibility_source.get(name)]
     if missing or changed:
         raise ValueError(f"Full8 format-7 inference source code is incompatible: missing={missing}, changed={changed}")
 
@@ -182,6 +185,7 @@ def load_gate_checkpoint_for_d01(
     current_source = checkpoint_module.full8_source_code_sha256()
     adapted, diagnostic, audit, origin = prepare_format7_gate_payload(
         payload, current_source_hashes=current_source,
+        checkpoint_compat_source_hashes=checkpoint_compat_source_hashes,
     )
     checkpoint_module._validate_gate_payload(adapted, gate)
     expected_provenance = dict(expected_expert_checkpoint_provenance)

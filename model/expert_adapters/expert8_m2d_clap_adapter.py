@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-import os
 import tempfile
 from typing import Any
 
@@ -40,21 +39,8 @@ _AUDIO_SAMPLES = 160_000
 _SAMPLE_RATE = 16_000
 
 
-def _text_cache_path(cache_dir: Any = None) -> Path | None:
-    value = cache_dir if cache_dir is not None else os.environ.get("HF_HOME")
-    if value is None:
-        return None
-    root = Path(value).expanduser().resolve(strict=False)
-    hub = root / "hub"
-    if hub.is_dir():
-        return hub
-    if root.is_dir() and any(root.glob("models--*")):
-        return root
-    return root
-
-
 def _construct_model(base_checkpoint: Path, payload: Mapping[str, Any], *, device: torch.device,
-                     offline: bool, cache_dir: Any) -> tuple[nn.Module, CoralHead]:
+                     offline: bool, cache_dir: Any, text_model_dir: Path) -> tuple[nn.Module, CoralHead]:
     try:
         from expert3_finetune.XACLE_2027_baselinemodel.models.moescore_expert3 import (
             prepare_m2d_checkpoint,
@@ -72,13 +58,8 @@ def _construct_model(base_checkpoint: Path, payload: Mapping[str, Any], *, devic
         with tempfile.TemporaryDirectory(prefix="moescore-m2d-lora-coral-layout-") as temporary:
             compatible = prepare_m2d_checkpoint(base_checkpoint, temporary)
             with huggingface_environment(offline=offline, cache_dir=cache_dir):
-                text_cache = _text_cache_path(cache_dir)
-                if text_cache is not None:
-                    # E8's BertXEncoder accepts a direct cache_dir; HF_HOME normally
-                    # points one directory above the actual hub snapshot directory.
-                    os.environ["HF_HOME"] = str(text_cache)
                 model = PortableM2D(str(compatible), flat_features=True)
-                model.get_clap_text_encoder()
+                model.get_clap_text_encoder(text_model_dir=str(text_model_dir))
                 model.requires_grad_(False)
                 targets = inject_expert8_lora(model, payload["cfg"])
                 restore_ordered_expert8_lora(model, payload["lora"], targets=targets)
@@ -121,9 +102,13 @@ class Expert8M2DCLAPAdapter(ExpertAdapter):
     @classmethod
     def from_config(cls, config: Mapping, *, device: Any = None) -> "Expert8M2DCLAPAdapter":
         section, runtime = adapter_config(config, "expert8")
-        for field in ("base_checkpoint", "finetuned_checkpoint"):
+        for field in ("base_checkpoint", "finetuned_checkpoint", "text_model_dir"):
             if field not in section:
                 raise ValueError(f"expert8 config is missing required {field}")
+        text_model_dir = resolved_resource(
+            section["text_model_dir"], field="text_model_dir", adapter_name=_ADAPTER_NAME,
+            directory=True,
+        )
         base_checkpoint = resolved_resource(
             section["base_checkpoint"], field="base_checkpoint", adapter_name=_ADAPTER_NAME
         )
@@ -140,7 +125,8 @@ class Expert8M2DCLAPAdapter(ExpertAdapter):
         cache_dir = runtime.get("cache_dir")
         payload = load_expert8_checkpoint(finetuned_checkpoint)
         model, head = _construct_model(
-            base_checkpoint, payload, device=selected_device, offline=offline, cache_dir=cache_dir
+            base_checkpoint, payload, device=selected_device, offline=offline, cache_dir=cache_dir,
+            text_model_dir=text_model_dir,
         )
         return cls(model, head)
 

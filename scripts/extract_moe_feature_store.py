@@ -48,6 +48,10 @@ from model.expert_adapters.registry import (
     EXPERT_PROFILES, profile_contract,
     ALL_EXPERT_INPUT_CONTRACTS,
 )
+from scripts.expert8_text_resource import (
+    EXPERT8_TEXT_MODEL_ID,
+    local_expert8_text_resource_identity,
+)
 
 EXPECTED_COUNTS = {"train": 7500, "validation": 3000, "test": 3000}
 _TEXT_SNAPSHOT_CACHE = {}  # Compatibility hook; snapshots are re-hashed on every evaluation.
@@ -141,9 +145,8 @@ _TEXT_RESOURCE_IDS = {
     "top2_msclap": ("gpt2",),
     "top2_laion": ("roberta-base",),
     "top2_mga": ("bert-base-uncased",),
-    # PortableM2D's BertXEncoder defaults to this exact Hub ID.
+    # Full9's M2D-LoRA expert keeps its original Hub-cache behavior.
     "m2d_lora": ("google-bert/bert-base-uncased",),
-    "expert8": ("google-bert/bert-base-uncased",),
 }
 _DEPENDENCIES = {
     "expert1": ("torch", "numpy", "laion-clap", "transformers", "torchaudio", "torchlibrosa"),
@@ -315,6 +318,7 @@ def compute_expert_cache_identity(expert, config, *, contract=None, feature_dim=
         implementation_files.update({
             PROJECT_ROOT / "model/expert_adapters/expert8_m2d_clap_runtime.py",
             PROJECT_ROOT / "model/expert_adapters/m2d_lora_runtime.py",
+            PROJECT_ROOT / "scripts/expert8_text_resource.py",
         })
     if expert == "top2_mga" and not section.get("source_dir"):
         implementation_files.update(
@@ -361,10 +365,19 @@ def compute_expert_cache_identity(expert, config, *, contract=None, feature_dim=
         configured_model = str(section.get("model_name_or_path", "laion/clap-htsat-unfused"))
         if configured_model not in text_model_ids:
             text_model_ids.append(configured_model)
-    text_resources = {
-        model_id: _text_snapshot_identity(model_id, runtime, _TEXT_SNAPSHOT_CACHE)
-        for model_id in text_model_ids
-    }
+    if expert == "expert8":
+        text_resources = {
+            "expert8_text_model": local_expert8_text_resource_identity(
+                section.get("text_model_dir"),
+                repo_id=section.get("text_model_repo_id", EXPERT8_TEXT_MODEL_ID),
+                revision=section.get("text_model_revision"),
+            )
+        }
+    else:
+        text_resources = {
+            model_id: _text_snapshot_identity(model_id, runtime, _TEXT_SNAPSHOT_CACHE)
+            for model_id in text_model_ids
+        }
     dependencies = {}
     for distribution in _DEPENDENCIES.get(expert, ()):
         try:

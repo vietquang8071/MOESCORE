@@ -143,7 +143,7 @@ def _config(path: str | Path, *, device: str) -> dict[str, Any]:
             or not isinstance(body["experts"].get("expert8"), dict)):
         raise ValueError("Expert8 config requires runtime and experts.expert8 mappings")
     section = body["experts"]["expert8"]
-    for field in ("base_checkpoint", "finetuned_checkpoint"):
+    for field in ("base_checkpoint", "finetuned_checkpoint", "text_model_dir"):
         if not isinstance(section.get(field), str) or not section[field]:
             raise ValueError(f"experts.expert8.{field} is required")
         section[field] = str((source.parent / section[field]).resolve()) if not Path(section[field]).is_absolute() else section[field]

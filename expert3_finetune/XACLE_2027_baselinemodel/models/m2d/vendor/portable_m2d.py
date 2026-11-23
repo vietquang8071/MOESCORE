@@ -461,9 +461,12 @@ class PortableM2D(torch.nn.Module):
             text_embeddings = self.backbone.text_proj(text_embeddings)
         return text_embeddings
 
-    def get_clap_text_encoder(self):
+    def get_clap_text_encoder(self, *, text_model_dir=None):
         text_encoder_weight = self.cfg.text_encoder_weight if hasattr(self.cfg, 'text_encoder_weight') else None
-        self.text_encoder = get_text_encoder(self.cfg.weight_file, text_encoder_weight=text_encoder_weight)
+        self.text_encoder = get_text_encoder(
+            self.cfg.weight_file, text_encoder_weight=text_encoder_weight,
+            text_model_dir=text_model_dir,
+        )
         self.text_encoder = self.text_encoder.to(next(self.backbone.parameters()).device)
 
 
@@ -543,12 +546,16 @@ class CLIPLTextEncoder(torch.nn.Module):
 
 
 class BertXEncoder(torch.nn.Module):
-    def __init__(self, clip_weight="google-bert/bert-base-uncased"):
+    def __init__(self, clip_weight="google-bert/bert-base-uncased", *, local_files_only=False):
         super().__init__()
         from transformers import AutoTokenizer, AutoModel
         import os
         os.environ["TOKENIZERS_PARALLELISM"] = "true"  # To suppress warnings.
 
+        if local_files_only:
+            self.tokenizer = AutoTokenizer.from_pretrained(clip_weight, local_files_only=True)
+            self.text_encoder = AutoModel.from_pretrained(clip_weight, local_files_only=True)
+            return
         cache_dir = os.environ.get("HF_HUB_CACHE") or (
             os.path.join(os.environ["HF_HOME"], "hub") if os.environ.get("HF_HOME") else None
         )
@@ -568,7 +575,7 @@ class BertXEncoder(torch.nn.Module):
         return text_feats
 
 
-def get_text_encoder(weight, text_encoder_weight=None):
+def get_text_encoder(weight, text_encoder_weight=None, *, text_model_dir=None):
     try:
         clap_type = parse_clap_type(Path(weight).parent.name)
     except:
@@ -577,7 +584,10 @@ def get_text_encoder(weight, text_encoder_weight=None):
     if clap_type == 'A':
         text_model = GTETextEncoder()
     if clap_type == 'B':
-        text_model = BertXEncoder()
+        text_model = BertXEncoder(
+            clip_weight=str(text_model_dir) if text_model_dir is not None else "google-bert/bert-base-uncased",
+            local_files_only=text_model_dir is not None,
+        )
     if clap_type == 'C':
         text_model = CLIPLTextEncoder()
     if clap_type == 'L':

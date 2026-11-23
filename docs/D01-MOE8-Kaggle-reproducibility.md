@@ -5,7 +5,7 @@
 - Notebook: `notebooks/XACLE2027_D01_MOE8_Kaggle.ipynb`
 - Gói push: `kaggle/d01_moe8/`
 - Kernel riêng tư: `qnv8071/xacle-2027-d01-moe8-convex-envelope-diagnostics`
-- Mã nguồn MOESCORE được checkout detached tại `d9868ba6de085da27074f924e8c15a43d4e3cd1f`.
+- Mã nguồn MOESCORE được checkout detached tại `eb6d8c410e63dcecf3e688dbf22938de95c73bed`.
 - Dataset IDs được Kaggle CLI xác minh: `qnv8071/moe8-bestgate`, `qnv8071/recovery`, `qnv8071/xacle-weights`, `qnv8071/xacle-2027-data`, `qnv8071/moescore-full9-feature-cache`.
 
 Kernel chỉ gắn năm dataset trên. Dataset đánh giá riêng tư không được truy vấn, gắn, tải, mở, hoặc tham chiếu trong code. Kernel bật internet để checkout commit đã ghim và cài các dependency còn thiếu; T4 chỉ cần khi không có cache Expert8 phù hợp. Nếu có store Full8 tương thích hoặc cache Expert8 dùng được, inference gate và tính toán D01 chạy trên CPU.

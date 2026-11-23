@@ -716,6 +716,97 @@ def write_prediction_csv(path: str | Path, rows: Sequence[Mapping[str, Any]]) ->
         writer.writerows(rows)
 
 
+def validate_d01_feature_store(
+    root: str | Path,
+    profile: str,
+    expected_counts: Mapping[str, int],
+    *,
+    source_manifest_root: str | Path,
+) -> dict[str, dict[str, Any]]:
+    """Validate each public split against its own canonical source manifest."""
+    import hashlib
+
+    from data.moe_feature_store import preprocessing_contract, validate_feature_store
+    from data.set_a_cached_dataset import _read_source_manifest
+    from model.expert_adapters.registry import profile_contract
+
+    if profile not in {"full_7", "full_8"}:
+        raise ValueError(f"D01 profile must be full_7 or full_8, got {profile!r}")
+    splits = ("train", "validation", "test")
+    if set(expected_counts) != set(splits) or any(
+        type(expected_counts[split]) is not int or expected_counts[split] <= 0 for split in splits
+    ):
+        raise ValueError("D01 expected_counts must give positive integer counts for train/validation/test")
+
+    order, dimensions, width = profile_contract(profile)
+    source_root = Path(source_manifest_root)
+    result: dict[str, dict[str, Any]] = {}
+    reference_provenance = None
+    reference_preprocessing = None
+    for split in splits:
+        context = {"root": str(root), "split": split, "profile": profile}
+        try:
+            manifest = validate_feature_store(root, split=split, require_labels=split != "test")
+            if manifest.get("split") != split:
+                raise ValueError("manifest split identity mismatch")
+            if manifest.get("expert_profile") != profile:
+                raise ValueError(f"expert profile mismatch: {manifest.get('expert_profile')!r}")
+            if (manifest.get("expert_order") != list(order)
+                    or manifest.get("feature_dimensions") != dimensions
+                    or manifest.get("feature_width") != width
+                    or manifest.get("score_width") != len(order)):
+                raise ValueError("expert order/count or feature dimensions do not match the profile contract")
+            rows = manifest["shards"]
+            sample_ids = [sample_id for shard in rows for sample_id in shard["sample_ids"]]
+            filenames = [name for shard in rows for name in shard["wave_file_names"]]
+            sample_count = sum(shard["count"] for shard in rows)
+            if sample_count != expected_counts[split]:
+                raise ValueError(f"sample count {sample_count} != expected {expected_counts[split]}")
+            if len(sample_ids) != len(set(sample_ids)) or len(filenames) != len(set(filenames)):
+                raise ValueError("sample IDs or source filenames are not unique")
+            if manifest.get("labels_present") is not (split != "test"):
+                raise ValueError("label presence does not match the public split contract")
+
+            source_digest = manifest.get("source_manifest_sha256")
+            if (not isinstance(source_digest, str) or len(source_digest) != 64
+                    or any(character not in "0123456789abcdef" for character in source_digest.lower())):
+                raise ValueError("source manifest digest is not a 64-character hexadecimal SHA-256")
+            source_records = _read_source_manifest(
+                source_root / split / "source_manifest.json",
+                split=split,
+                expected_sha256=source_digest,
+            )
+            if len(source_records) != expected_counts[split]:
+                raise ValueError("source manifest row count differs from the expected split count")
+            if ([record["sample_id"] for record in source_records] != sample_ids
+                    or [record["wave_file_name"] for record in source_records] != filenames):
+                raise ValueError("source manifest sample IDs/filenames differ from feature-store order")
+            fingerprints = manifest["assembly_identity"]["ordered_source_fingerprints"]
+            observed_fingerprints = [
+                {
+                    "sample_id": record["sample_id"],
+                    "wav_sha256": record["wav_sha256"].lower(),
+                    "caption_sha256": hashlib.sha256(record["raw_caption"].encode("utf-8")).hexdigest(),
+                }
+                for record in source_records
+            ]
+            if fingerprints != observed_fingerprints:
+                raise ValueError("source manifest WAV/caption fingerprints differ from feature-store assembly")
+
+            provenance = manifest["checkpoint_provenance"]
+            preprocessing = preprocessing_contract(manifest)
+            if reference_provenance is None:
+                reference_provenance, reference_preprocessing = provenance, preprocessing
+            elif provenance != reference_provenance:
+                raise ValueError("expert checkpoint provenance differs across public splits")
+            elif preprocessing != reference_preprocessing:
+                raise ValueError("compatible preprocessing contracts differ across public splits")
+            result[split] = manifest
+        except Exception as exc:
+            raise ValueError(f"{split}: D01 feature-store validation failed ({context}): {exc}") from exc
+    return result
+
+
 __all__ = [
     "DEFAULT_ACCURACY_THRESHOLD_RAW",
     "DEFAULT_SENSITIVITY_THRESHOLDS_RAW",
@@ -734,5 +825,6 @@ __all__ = [
     "normalize_raw_scores",
     "prepare_format7_gate_payload",
     "summarize_by_generator",
+    "validate_d01_feature_store",
     "write_prediction_csv",
 ]

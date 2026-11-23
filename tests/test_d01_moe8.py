@@ -172,12 +172,19 @@ class D01Moe8Tests(unittest.TestCase):
         notebook_text = json.dumps(notebook)
         self.assertNotIn("XACLE2027_evaluation_dataset", notebook_text)
         self.assertIn("--allow-public-split-audio-overlap", notebook_text)
+        cells = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
+        self.assertIn("validate_d01_feature_store", cells)
+        self.assertNotIn('len({m["source_manifest_sha256"] for m in result.values()})', cells)
         self.assertEqual(metadata["id"], "qnv8071/xacle-2027-d01-moe8-convex-envelope-diagnostics")
         self.assertEqual(metadata["is_private"], "true")
         self.assertEqual(set(metadata["dataset_sources"]), {
             "qnv8071/moe8-bestgate", "qnv8071/recovery", "qnv8071/xacle-weights",
             "qnv8071/xacle-2027-data", "qnv8071/moescore-full9-feature-cache",
         })
+
+        full8_notebook = json.loads((root / "notebooks/MOESCORE_Full8_T4x2_Kaggle.ipynb").read_text())
+        full8_text = "\n".join("".join(cell.get("source", [])) for cell in full8_notebook["cells"])
+        self.assertNotIn('len({m["source_manifest_sha256"] for m in manifests.values()})', full8_text)
         packaged = json.loads((root / "kaggle/d01_moe8/XACLE2027_D01_MOE8_Kaggle.ipynb").read_text())
         self.assertEqual(packaged, notebook)
 

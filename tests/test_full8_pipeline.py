@@ -579,3 +579,201 @@ def test_full8_global_gate_trains_on_full_train_store_and_saves_loadable_checkpo
     with Path(inference["output_csv"]).open(newline="", encoding="utf-8") as stream:
         assert next(csv.reader(stream)) == ["wave_file_name", "pred_score"]
         assert sum(1 for _ in csv.reader(stream)) == 2
+
+
+def _write_d01_validation_fixture(root, source_root, profile="full_8"):
+    import hashlib
+    import json
+
+    from data.moe_feature_store import MoeFeatureStoreWriter
+    from data.set_a_cached_dataset import _fingerprint
+
+    expected = {}
+    for split in ("train", "validation", "test"):
+        sample_ids = [f"{split}:a.wav", f"{split}:b.wav"]
+        filenames = ["a.wav", "b.wav"]
+        records = [
+            {
+                "sample_id": sample_id,
+                "wave_file_name": filename,
+                "raw_caption": f"{split} caption {index}",
+                "wav_sha256": hashlib.sha256(f"{split}-{index}".encode()).hexdigest(),
+                "label_raw": None if split == "test" else float(4 + index),
+            }
+            for index, (sample_id, filename) in enumerate(zip(sample_ids, filenames))
+        ]
+        body = {"schema_version": 1, "split": split, "records": records}
+        source_digest = _fingerprint(body)
+        source_split = source_root / split
+        source_split.mkdir(parents=True, exist_ok=True)
+        (source_split / "source_manifest.json").write_text(
+            json.dumps({**body, "sha256": source_digest}, sort_keys=True), encoding="utf-8"
+        )
+        expected[split] = len(records)
+
+        full8_assembly, e8_identity = _synthetic_full8_assembly(split, sample_ids, source_digest)
+        full8_assembly["ordered_source_fingerprints"] = [
+            {
+                "sample_id": row["sample_id"],
+                "wav_sha256": row["wav_sha256"],
+                "caption_sha256": hashlib.sha256(row["raw_caption"].encode()).hexdigest(),
+            }
+            for row in records
+        ]
+        if profile == "full_8":
+            order = FULL8_EXPERT_ORDER
+            dimensions = profile_contract("full_8")[1]
+            provenance = {
+                name: {"checkpoint_sha256": f"{index + 1:064x}"}
+                for index, name in enumerate(FULL7_EXPERT_ORDER)
+            }
+            provenance["expert8"] = e8_identity["checkpoint_provenance"]
+            assembly = full8_assembly
+        else:
+            order = FULL7_EXPERT_ORDER
+            dimensions = profile_contract("full_7")[1]
+            provenance = {
+                name: {"checkpoint_sha256": f"{index + 1:064x}"}
+                for index, name in enumerate(order)
+            }
+            assembly = {
+                "source_full9_store_identity": "c" * 64,
+                "source_whisper_manifest_sha256": "d" * 64,
+                "score_contracts": {name: full8_assembly["score_contracts"][name] for name in order},
+                "shared_source_contract": {"fixture": "full7"},
+                "ordered_source_fingerprints": full8_assembly["ordered_source_fingerprints"],
+                "head_membership": {
+                    name: {"per_row": ["SYNTHETIC_UNTRAINED_HEAD"] * len(records)}
+                    for name in ("expert5", "expert6")
+                },
+                "synthetic_provenance": True,
+            }
+
+        writer = MoeFeatureStoreWriter(
+            root, split=split, expected_sample_ids=sample_ids,
+            source_manifest_sha256=source_digest, checkpoint_provenance=provenance,
+            preprocessing_identity={"fixture": profile}, profile=profile,
+            assembly_identity=assembly,
+        )
+        labels = {} if split == "test" else {"labels_raw": np.array([4, 5], dtype=np.float32)}
+        writer.write_shard(
+            0, sample_ids=sample_ids, wave_file_names=filenames,
+            scores=np.zeros((2, len(order)), dtype=np.float32),
+            features=np.zeros((2, sum(dimensions.values())), dtype=np.float32),
+            **labels,
+        )
+        writer.finalize()
+    return expected
+
+
+def _rewrite_store_manifest(root, split, **changes):
+    import hashlib
+    import json
+
+    from data.moe_feature_store import _canonical_json
+
+    path = root / split / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest.update(changes)
+    body = {key: value for key, value in manifest.items() if key != "store_identity_sha256"}
+    manifest["store_identity_sha256"] = hashlib.sha256(_canonical_json(body)).hexdigest()
+    path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+
+
+@pytest.mark.parametrize("profile", ["full_7", "full_8"])
+def test_d01_validator_accepts_split_specific_source_manifests(tmp_path, profile):
+    from scripts.diagnostics.d01_moe8 import validate_d01_feature_store
+
+    root, sources = tmp_path / profile, tmp_path / "sources"
+    expected = _write_d01_validation_fixture(root, sources, profile)
+    result = validate_d01_feature_store(root, profile, expected, source_manifest_root=sources)
+    assert len({result[split]["source_manifest_sha256"] for split in expected}) == 3
+    for split in expected:
+        sample_ids = [sample for shard in result[split]["shards"] for sample in shard["sample_ids"]]
+        assert sample_ids == [f"{split}:a.wav", f"{split}:b.wav"]
+
+
+@pytest.mark.parametrize(
+    "mutation,match",
+    [
+        ({"source_manifest_sha256": "bad"}, "source manifest"),
+        ({"split": "validation"}, "split"),
+        ({"expert_profile": "full_9"}, "full_8"),
+        ({"expert_profile": "full_10"}, "profile"),
+        ({"feature_width": 33031}, "dimensions"),
+        ({"score_width": 7}, "score"),
+        ({"labels_present": False}, "labels"),
+    ],
+)
+def test_d01_validator_rejects_invalid_feature_store_contracts(tmp_path, mutation, match):
+    from scripts.diagnostics.d01_moe8 import validate_d01_feature_store
+
+    root, sources = tmp_path / "full8", tmp_path / "sources"
+    expected = _write_d01_validation_fixture(root, sources, "full_8")
+    _rewrite_store_manifest(root, "train", **mutation)
+    with pytest.raises((ValueError, KeyError), match=match):
+        validate_d01_feature_store(root, "full_8", expected, source_manifest_root=sources)
+
+
+def test_d01_validator_rejects_test_labels_and_corrupt_source_manifests(tmp_path):
+    import json
+
+    from scripts.diagnostics.d01_moe8 import validate_d01_feature_store
+
+    root, sources = tmp_path / "full8", tmp_path / "sources"
+    expected = _write_d01_validation_fixture(root, sources, "full_8")
+    _rewrite_store_manifest(root, "test", labels_present=True)
+    with pytest.raises(ValueError, match="test.*label"):
+        validate_d01_feature_store(root, "full_8", expected, source_manifest_root=sources)
+
+    root_validation, sources_validation = tmp_path / "full8_no_val_labels", tmp_path / "sources_no_val_labels"
+    expected_validation = _write_d01_validation_fixture(root_validation, sources_validation, "full_8")
+    _rewrite_store_manifest(root_validation, "validation", labels_present=False)
+    with pytest.raises(ValueError, match="validation.*label"):
+        validate_d01_feature_store(
+            root_validation, "full_8", expected_validation, source_manifest_root=sources_validation,
+        )
+
+    root2, sources2 = tmp_path / "full8_corrupt", tmp_path / "sources_corrupt"
+    expected2 = _write_d01_validation_fixture(root2, sources2, "full_8")
+    source_path = sources2 / "validation" / "source_manifest.json"
+    source = json.loads(source_path.read_text(encoding="utf-8"))
+    source["records"][0]["raw_caption"] = "tampered caption"
+    source_path.write_text(json.dumps(source), encoding="utf-8")
+    with pytest.raises(ValueError, match="validation.*identity/provenance mismatch"):
+        validate_d01_feature_store(root2, "full_8", expected2, source_manifest_root=sources2)
+
+
+def test_d01_validator_rejects_malformed_split_source_digest(tmp_path):
+    from scripts.diagnostics.d01_moe8 import validate_d01_feature_store
+
+    root, sources = tmp_path / "full7", tmp_path / "sources"
+    expected = _write_d01_validation_fixture(root, sources, "full_7")
+    _rewrite_store_manifest(root, "train", source_manifest_sha256="g" * 64)
+    with pytest.raises(ValueError, match="train.*source manifest SHA-256"):
+        validate_d01_feature_store(root, "full_7", expected, source_manifest_root=sources)
+
+
+def test_d01_validator_rejects_unexpected_sample_count(tmp_path):
+    from scripts.diagnostics.d01_moe8 import validate_d01_feature_store
+
+    root, sources = tmp_path / "full8", tmp_path / "sources"
+    expected = _write_d01_validation_fixture(root, sources, "full_8")
+    expected["test"] += 1
+    with pytest.raises(ValueError, match="test.*sample count"):
+        validate_d01_feature_store(root, "full_8", expected, source_manifest_root=sources)
+
+
+def test_d01_validator_rejects_cross_split_checkpoint_provenance_mismatch(tmp_path):
+    import json
+
+    from scripts.diagnostics.d01_moe8 import validate_d01_feature_store
+
+    root, sources = tmp_path / "full8", tmp_path / "sources"
+    expected = _write_d01_validation_fixture(root, sources, "full_8")
+    manifest = json.loads((root / "validation" / "manifest.json").read_text(encoding="utf-8"))
+    provenance = dict(manifest["checkpoint_provenance"])
+    provenance["expert1"] = {"checkpoint_sha256": "f" * 64}
+    _rewrite_store_manifest(root, "validation", checkpoint_provenance=provenance)
+    with pytest.raises(ValueError, match="validation.*checkpoint provenance differs"):
+        validate_d01_feature_store(root, "full_8", expected, source_manifest_root=sources)

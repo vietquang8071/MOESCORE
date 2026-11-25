@@ -666,13 +666,13 @@ def _write_d01_validation_fixture(root, source_root, profile="full_8"):
     return expected
 
 
-def _rewrite_store_manifest(root, split, **changes):
+def _rewrite_store_manifest(root, target_split, **changes):
     import hashlib
     import json
 
     from data.moe_feature_store import _canonical_json
 
-    path = root / split / "manifest.json"
+    path = root / target_split / "manifest.json"
     manifest = json.loads(path.read_text(encoding="utf-8"))
     manifest.update(changes)
     body = {key: value for key, value in manifest.items() if key != "store_identity_sha256"}
@@ -696,7 +696,7 @@ def test_d01_validator_accepts_split_specific_source_manifests(tmp_path, profile
 @pytest.mark.parametrize(
     "mutation,match",
     [
-        ({"source_manifest_sha256": "bad"}, "source manifest"),
+        ({"source_manifest_sha256": "bad"}, "source manifest|source split identity"),
         ({"split": "validation"}, "split"),
         ({"expert_profile": "full_9"}, "full_8"),
         ({"expert_profile": "full_10"}, "profile"),

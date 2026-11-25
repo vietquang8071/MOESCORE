@@ -1,51 +1,67 @@
-# D01 MOE8 trên Kaggle — ghi chú tái lập
+# XACLE 2027 D01 — frozen MOE8 reproduction
 
-## Mã nguồn và kernel
+## Inputs
 
-- Notebook: `notebooks/XACLE2027_D01_MOE8_Kaggle.ipynb`
-- Gói push: `kaggle/d01_moe8/`
-- Kernel riêng tư: `qnv8071/xacle-2027-d01-moe8-convex-envelope-diagnostics`
-- Mã nguồn MOESCORE được checkout detached tại `2e6c247563b554116017c5f8630cda7ae257bc59`.
-- Dataset IDs được Kaggle CLI xác minh: `qnv8071/moe8-bestgate`, `qnv8071/recovery`, `qnv8071/xacle-weights`, `qnv8071/xacle-2027-data`, `qnv8071/moescore-full9-feature-cache`.
+The private Kaggle kernel is `qnv8071/xacle-2027-d01-moe8-convex-envelope-diagnostics`. It attaches only:
 
-Kernel chỉ gắn năm dataset trên. Dataset đánh giá riêng tư không được truy vấn, gắn, tải, mở, hoặc tham chiếu trong code. Kernel bật internet để checkout commit đã ghim và cài các dependency còn thiếu; T4 chỉ cần khi không có cache Expert8 phù hợp. Nếu có store Full8 tương thích hoặc cache Expert8 dùng được, inference gate và tính toán D01 chạy trên CPU.
+- `qnv8071/moescore-full8-artifacts` — paired format-7 Gate checkpoint, configuration, run manifest and Full8 store.
+- `qnv8071/xacle-2027-data` — official public train, validation and test metadata.
 
-## Quy trình và hợp đồng
+The notebook locates mounts by these verified slugs, scoped to the corresponding dataset mount. It rejects missing or ambiguous checkpoints, run/config files, stores or metadata roots. It does not scan unrelated dataset mounts. The private kernel has CPU only; Internet is enabled only to fetch pinned repository commits. No pretrained weights or backbones are fetched.
 
-Checkpoint public thực tế là format v7 (không phải format v5 của source commit ghim), nhưng giữ `full_8`, đúng thứ tự `expert1`…`expert8`, 8 điểm, 8 trọng số gate và feature width 33,032. Adapter D01 trong `scripts/diagnostics/d01_moe8.py` xác minh source hash liên quan trực tiếp đến gate/score/store, kiến trúc, fingerprints và provenance; sau đó dùng validator format v5 đã ghim để kiểm tra compatibility view và nạp state dict strict. Các source khác biệt được ghi trong `gate_source_code_audit`; store train/validation và preprocessing phải khớp identity của checkpoint.
+## Runtime workflow
 
-Format v7 không lưu riêng overlap diagnostic/policy. Notebook tái lập diagnostic từ các sample ID và WAV SHA-256 nằm trong checkpoint, bật override repository chỉ khi hash overlap tồn tại, rồi đối chiếu diagnostic với manifests trước khi dựng store. Nguồn của chính sách này được ghi ở `train_validation_overlap_policy_origin`.
+1. Checkout the notebook's pinned source commit and fetch the Gate's recorded compatibility commit.
+2. Verify the Gate file SHA against `run_manifest.json`, safely load the format-7 payload, and verify its complete 33-file source hash map against the recorded source commit.
+3. Check the active Gate, score-transform, feature-store and Full8-contract source files against the checkpoint source. Use the explicit D01 format-7 adapter to validate fingerprints and load the frozen state dict with `strict=True`.
+4. Read train, validation and test directly through the existing shard-backed Full8 dataset reader. Its validator checks split manifests, identities, expert order/dimensions, every shard hash, array shapes/dtypes, finiteness, and label policy.
+5. Compare train/validation store identities to the paired Gate, and compare checkpoint provenance and preprocessing/score contracts across all splits.
+6. Run the gate on CPU in `eval()` and `torch.inference_mode()`. The notebook loads no expert checkpoint and does not reconstruct, extract, assemble, calibrate or train anything.
+7. Write label-free public-test predictions, record their CSV hash, and only then inspect public test metadata for optional descriptive labels.
+8. Generate D01 score-envelope metrics, bins/tails, generator summaries, overlap notes and plots.
 
-Nếu không tìm thấy Full8 tương thích, notebook tìm Full7/Full9 và Whisper/E5/E6 cache đã gắn, xác minh hàng theo sample ID, rồi gọi builder hiện có. Luồng D01 bật riêng `--allow-public-split-audio-overlap` cho Full7/Full8 assembly để giữ nguyên cả 13.500 hàng public khi WAV SHA-256 trùng giữa train, validation hoặc test; builder mặc định vẫn strict, và cờ này không được truyền vào huấn luyện/checkpoint fitting. `reports/audio_overlap.json` ghi tất cả SHA-256, sample IDs, số nhóm theo cặp split, chính sách override và cảnh báo bias. Notebook xác minh ID/count/thứ tự sau mỗi store; overlap chỉ bị loại khỏi phép gộp metric sensitivity tùy chọn, không loại khỏi feature store hay predictions. Nếu cache Expert8 hợp lệ không khớp provenance gate thì notebook mới gọi extractor Expert8 có resume trên Kaggle T4; không chạy lại expert khác.
+Split-specific source-manifest hashes are validated separately by the Full8 manifest validator and are not required to match across splits. Sample IDs remain in the recorded shard order. The gate and store identities must match exactly; mismatches stop the run with the observed split and identity values.
 
-Mỗi split có `source_manifest_sha256` riêng. D01 kiểm tra digest canonical với nội dung `source_manifest.json` tương ứng, rồi đối chiếu sample ID, filename và WAV/caption fingerprints theo đúng thứ tự của feature store; không yêu cầu ba split có cùng digest. Checkpoint identities và preprocessing contract vẫn phải khớp giữa split. Notebook Full8 dùng chung validator đã bỏ equality sai này và giữ kiểm tra provenance chéo split.
+## WAV overlap and evaluation
 
-Điểm expert không được hiệu chỉnh, clamp hay chuẩn hóa lại. E1/E2 là similarity proxy, E3–E8 là regression score; raw-unit `5*s+5` chỉ là phép diễn giải. Tính toán envelope thực hiện trên normalized scores. Raw MSE bằng 25 lần normalized MSE. Oracle projection và MSE lower bound là chẩn đoán sample-wise, không phải hiệu năng gate có thể đạt.
+Cross-split SHA-256 matches are descriptive metadata, not a precondition for inference. D01 keeps all 7,500 train, 3,000 validation and 3,000 public test samples. It reports duplicate hashes/sample IDs and a possible evaluation-bias warning. Optional overlap sensitivity excludes affected rows only while aggregating metrics; prediction files and feature stores retain every row.
 
-Train được đánh dấu mô tả in-sample, validation mang lịch sử lựa chọn validation, và D01 không phải LOGO. Test labels—nếu metadata public phát hành—chỉ được đọc sau khi inference test không nhãn đã hoàn tất và chỉ cho báo cáo mô tả; nếu thiếu thì không có oracle/error/SRCC/MSE test. Không có huấn luyện hoặc optimizer trong notebook.
+Train results are descriptive and may be in-sample. Validation results disclose the checkpoint's selection policy. The run is not a LOGO experiment. Public test labels are not part of inference and are read only after the test prediction CSV is frozen; if labels are absent, supervised test metrics remain unavailable. No private evaluation data is used.
 
-## Artifact khi kernel chạy xong
+The score envelope is computed on the normalized expert scores. Raw values are interpreted as `5 * normalized + 5`, with no clipping or calibration. Raw MSE is 25 times normalized MSE. E1/E2 similarity scores retain their original semantics and are not treated as calibrated MOS. The oracle projection and MSE lower bound are theoretical sample-wise diagnostics, not a gate result that is guaranteed to be learnable.
 
-Kernel ghi vào `/kaggle/working/d01_moe8/`:
+## Outputs
 
-- `reports/audio_overlap.json`, `full7_build.json`, `full7_build.log`, `overlap_metric_sensitivity.json`
-- `reports/summary.json`, `global_metrics.csv`, `per_bin_metrics.csv`, `generator_metrics.csv`, `structural_vs_gating.json`, `provenance.json`, `D01-MOE8-report.md`
-- `predictions/{train,validation,test}_d01.csv`
-- `plots/*.png` — các biểu đồ riêng theo split và biểu đồ generator khi có metadata.
+The notebook checks out D01 runtime source commit `8010c4708a023e032ace397e68deb6afa01f56d5`. The paired Gate compatibility source remains pinned to the artifact-recorded commit `68124d0e57005d29149f659780ab749d14e09532`. The final deployment commit contains the synchronized notebook, metadata and documentation; runtime helper code is loaded from the stable D01 source commit.
 
-Không có số liệu thực nghiệm nào được điền sẵn trong source; các kết luận được dựng từ artifact runtime.
+The notebook writes to `/kaggle/working/d01_moe8/`:
 
-## Kiểm thử trước push
+- `predictions/{train,validation,test}_d01.csv` — sample ID, WAV filename, eight scores, eight gate weights, prediction and envelope; test labels remain blank.
+- `reports/summary.json`, `global_metrics.csv`, `per_bin_metrics.csv`, `generator_metrics.csv`, `structural_vs_gating.json`, `provenance.json`, `artifact_validation.json`, `audio_overlap.json`, and `D01-MOE8-report.md`.
+- `reports/overlap_metric_sensitivity.json` — metrics with/without overlapping IDs where labels exist; no rows are removed from stored data or predictions.
+- `plots/*.png` — matched-split histograms, envelope endpoint/scatter plots, per-bin errors, width distributions, tails and sufficiently populated generator groups.
 
-Synthetic D01/overlap tests chạy bằng `python3 -m unittest tests.test_d01_moe8 tests.test_public_audio_overlap -v`. Các integration tests hiện có cần pytest và PyTorch; nếu thiếu hai dependency này ở local, ghi rõ và không thay bằng inference đắt tiền. Notebook kiểm tra gate provenance/shape và inference equivalence khi Kaggle chạy.
+The provenance report records both dataset IDs, Gate SHA/format/source commit, Full8 store identities by split, preprocessing contracts, expert checkpoint provenance, counts, validation status, overlap policy and explicit zero-training/zero-extraction status. Kaggle's mounted input does not expose dataset version numbers to the notebook; the dataset IDs are recorded.
 
-## Lệnh Kaggle CLI
+## Reproduce and inspect
+
+Push the existing private kernel with:
+
+```bash
+kaggle kernels push -p kaggle/d01_moe8
+```
+
+Inspect status and logs:
 
 ```bash
 kaggle kernels status qnv8071/xacle-2027-d01-moe8-convex-envelope-diagnostics
 kaggle kernels logs qnv8071/xacle-2027-d01-moe8-convex-envelope-diagnostics
-kaggle kernels pull qnv8071/xacle-2027-d01-moe8-convex-envelope-diagnostics -p d01_moe8_kernel
+```
+
+After the job completes, download outputs:
+
+```bash
 kaggle kernels output qnv8071/xacle-2027-d01-moe8-convex-envelope-diagnostics -p d01_moe8_output
 ```
 
-`kernels push` xác nhận upload và khởi chạy job, không chứng minh run đã hoàn tất. Chỉ dùng `kernels output` sau khi `kernels status` báo run hoàn tất.
+An accepted `kernels push` confirms submission only; it does not verify that the Kaggle run finished successfully.

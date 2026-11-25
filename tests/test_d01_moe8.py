@@ -1,6 +1,7 @@
 import ast
 import csv
 import json
+import subprocess
 import sys
 import tempfile
 import types
@@ -16,11 +17,18 @@ from scripts.diagnostics.d01_moe8 import (
     FULL8_INFERENCE_COMPAT_SOURCE_FILES,
     analyze_split,
     build_prediction_rows,
+    classification_counts_for_score_bin,
     denormalize_scores,
     load_gate_checkpoint_for_d01,
     normalize_raw_scores,
     prepare_format7_gate_payload,
     write_prediction_csv,
+)
+from scripts.diagnostics.d01_moe8 import (
+    discover_frozen_artifacts,
+    read_aligned_public_metadata,
+    resolve_dataset_mount,
+    validate_frozen_artifact_pair,
 )
 
 
@@ -93,6 +101,15 @@ class D01Moe8Tests(unittest.TestCase):
         self.assertEqual(result["per_bin_metrics"][-1]["ground_truth_bin"], "[9,10]")
         self.assertEqual(result["per_bin_metrics"][-1]["sample_count"], 1)
 
+    def test_score_bin_class_counts_exclude_other_split_bins(self):
+        scores = np.array([[-1.0, 1.0], [-0.1, 0.1]])
+        weights = np.array([[1.0, 0.0], [0.5, 0.5]])
+        analysis = analyze_split(scores, weights, labels_raw=[9.5, 5.0])
+        self.assertEqual(
+            classification_counts_for_score_bin(analysis, [9.5, 5.0], 9.0, 10.0, include_upper=True),
+            {"A": 0, "B": 0, "C": 1, "D": 0},
+        )
+
     def test_vectorized_mse_lower_bound_matches_manual_example(self):
         scores = np.array([[-0.2, 0.2], [-0.8, -0.4]])
         weights = np.array([[0.25, 0.75], [0.5, 0.5]])
@@ -134,18 +151,22 @@ class D01Moe8Tests(unittest.TestCase):
             with self.subTest(scores=scores, weights=weights), self.assertRaises((TypeError, ValueError)):
                 analyze_split(scores, weights)
 
-    def test_prediction_csv_preserves_sample_order(self):
+    def test_prediction_csv_preserves_sample_identity_order(self):
         ids = ["validation:second.wav", "validation:first.wav"]
         scores = np.array([[0.1, 0.2], [-0.2, 0.4]])
         weights = np.array([[0.8, 0.2], [0.25, 0.75]])
         analysis = analyze_split(scores, weights, labels_raw=[5.0, 6.0])
-        rows = build_prediction_rows(ids, "validation", scores, weights, analysis, labels_raw=[5.0, 6.0])
+        rows = build_prediction_rows(
+            ids, "validation", scores, weights, analysis, labels_raw=[5.0, 6.0],
+            wave_file_names=["second.wav", "first.wav"],
+        )
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "predictions.csv"
             write_prediction_csv(output, rows)
             with output.open(newline="", encoding="utf-8") as stream:
                 saved = list(csv.DictReader(stream))
         self.assertEqual([row["sample_id"] for row in saved], ids)
+        self.assertEqual([row["wave_file_name"] for row in saved], ["second.wav", "first.wav"])
         self.assertAlmostEqual(float(saved[0]["expert1_score_normalized"]), 0.1)
         self.assertAlmostEqual(float(saved[1]["expert2_gate_weight"]), 0.75)
 
@@ -242,86 +263,309 @@ class D01Moe8Tests(unittest.TestCase):
                 checkpoint_compat_source_hashes=bad_baseline,
             )
 
-    def test_notebook_gate_load_calls_share_checkpoint_compatibility_hashes(self):
-        root = Path(__file__).resolve().parents[1]
-        notebook = json.loads((root / "notebooks/XACLE2027_D01_MOE8_Kaggle.ipynb").read_text())
-        calls = []
-        for cell in notebook["cells"]:
-            source = "".join(cell.get("source", []))
-            if cell.get("cell_type") != "code" or "load_gate_checkpoint_for_d01(" not in source:
-                continue
-            for node in ast.walk(ast.parse(source)):
-                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                        and node.func.id == "load_gate_checkpoint_for_d01"):
-                    calls.append(node)
-        self.assertEqual(len(calls), 2)
-        for call in calls:
-            keyword = next((item for item in call.keywords
-                            if item.arg == "checkpoint_compat_source_hashes"), None)
-            self.assertIsNotNone(keyword)
-            self.assertIsInstance(keyword.value, ast.Name)
-            self.assertEqual(keyword.value.id, "GATE_CHECKPOINT_COMPAT_SOURCE_HASHES")
-
-    def test_kaggle_notebook_is_public_only_and_diagnostic_scoped(self):
+    def test_notebook_is_frozen_artifact_only_public_split_inference(self):
         root = Path(__file__).resolve().parents[1]
         notebook = json.loads((root / "notebooks/XACLE2027_D01_MOE8_Kaggle.ipynb").read_text())
         metadata = json.loads((root / "kaggle/d01_moe8/kernel-metadata.json").read_text())
-        notebook_text = json.dumps(notebook)
-        self.assertNotIn("XACLE2027_evaluation_dataset", notebook_text)
-        self.assertIn("--allow-public-split-audio-overlap", notebook_text)
-        cells = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
-        self.assertIn("validate_d01_feature_store", cells)
-        self.assertNotIn('len({m["source_manifest_sha256"] for m in result.values()})', cells)
-        self.assertEqual(metadata["id"], "qnv8071/xacle-2027-d01-moe8-convex-envelope-diagnostics")
-        self.assertEqual(metadata["is_private"], "true")
-        self.assertEqual(metadata.get("enable_internet"), "true")
-        self.assertEqual(set(metadata["dataset_sources"]), {
-            "qnv8071/moe8-bestgate", "qnv8071/recovery", "qnv8071/xacle-weights",
-            "qnv8071/xacle-2027-data", "qnv8071/moescore-full9-feature-cache",
-        })
-
-        full8_notebook = json.loads((root / "notebooks/MOESCORE_Full8_T4x2_Kaggle.ipynb").read_text())
-        full8_text = "\n".join("".join(cell.get("source", [])) for cell in full8_notebook["cells"])
-        self.assertNotIn('len({m["source_manifest_sha256"] for m in manifests.values()})', full8_text)
-
-    def test_kaggle_bert_preflight_downloads_and_loads_the_local_model_before_feature_work(self):
-        root = Path(__file__).resolve().parents[1]
-        notebook = json.loads((root / "notebooks/XACLE2027_D01_MOE8_Kaggle.ipynb").read_text())
-        cells = ["".join(cell.get("source", [])) for cell in notebook["cells"]]
-        combined = "\n".join(cells)
-        resource_source = (root / "scripts/expert8_text_resource.py").read_text()
-        self.assertIn('WORK / "models/bert-base-uncased"', combined)
-        self.assertIn('EXPERT8_TEXT_MODEL_ID = "google-bert/bert-base-uncased"', resource_source)
-        self.assertIn("prepare_expert8_text_resource", combined)
-        setup_source = cells[4]
-        self.assertIn("inspect.signature(load_gate_checkpoint_for_d01)", setup_source)
-        self.assertIn("runtime_commit != SOURCE_COMMIT", setup_source)
-        self.assertLess(setup_source.index("inspect.signature(load_gate_checkpoint_for_d01)"),
-                        setup_source.index("prepare_expert8_text_resource(BERT_MODEL_DIR)"))
-        self.assertNotIn("DIAGNOSTIC_SOURCE", combined)
-        self.assertNotIn("diagnostic_path.write_text", combined)
-        self.assertIn("snapshot_download", resource_source)
-        self.assertIn("AutoTokenizer.from_pretrained(str(target), local_files_only=True)", resource_source)
-        self.assertIn("AutoModel.from_pretrained(str(target), local_files_only=True)", resource_source)
-        self.assertIn("expert8_cache_text_resource_matches", combined)
-        adapter_source = (root / "model/expert_adapters/expert8_m2d_clap_adapter.py").read_text()
-        portable_source = (root / "expert3_finetune/XACLE_2027_baselinemodel/models/m2d/vendor/portable_m2d.py").read_text()
-        self.assertIn("get_clap_text_encoder(text_model_dir=str(text_model_dir))", adapter_source)
-        self.assertIn("AutoTokenizer.from_pretrained(clip_weight, local_files_only=True)", portable_source)
-        self.assertIn("AutoModel.from_pretrained(clip_weight, local_files_only=True)", portable_source)
-        self.assertNotIn("hf_e8_cache", combined)
-        preflight_cell = next(i for i, source in enumerate(cells)
-                              if "prepare_expert8_text_resource(BERT_MODEL_DIR)" in source)
-        full7_cell = next(i for i, source in enumerate(cells) if "full7_cmd = [" in source)
-        e8_cell = next(i for i, source in enumerate(cells) if "e8_cmd = [sys.executable" in source)
-        self.assertLess(preflight_cell, full7_cell)
-        self.assertLess(preflight_cell, e8_cell)
-        self.assertIn('"text_model_dir": str(BERT_MODEL_DIR)', combined)
-        self.assertIn('"offline": True', combined)
-        self.assertIn('GATE_SOURCE_COMPAT_COMMIT = "2e6c247563b554116017c5f8630cda7ae257bc59"', cells[2])
-        self.assertIn('checkpoint_compat_source_hashes=GATE_CHECKPOINT_COMPAT_SOURCE_HASHES', cells[10])
         packaged = json.loads((root / "kaggle/d01_moe8/XACLE2027_D01_MOE8_Kaggle.ipynb").read_text())
         self.assertEqual(packaged, notebook)
+        notebook_text = json.dumps(notebook)
+        self.assertNotIn("XACLE2027_evaluation_dataset", notebook_text)
+        self.assertNotIn("XACLE2027_evaluation_dataset", json.dumps(metadata))
+        cells = ["".join(cell.get("source", [])) for cell in notebook["cells"]]
+        combined = "\n".join(cells)
+        for obsolete in ("moe8-bestgate", "moescore-full9-feature-cache", "xacle-weights", "recovery"):
+            self.assertNotIn(obsolete, combined)
+            self.assertNotIn(obsolete, json.dumps(metadata))
+        self.assertIn("moescore-full8-artifacts", combined)
+        self.assertIn("xacle-2027-data", combined)
+        self.assertIn("discover_frozen_artifacts", combined)
+        self.assertIn("MoeTrainingDataset", combined)
+        self.assertIn("load_gate_checkpoint_for_d01", combined)
+        self.assertIn("torch.inference_mode", combined)
+        self.assertNotIn("scripts.extract", combined)
+        self.assertNotIn("snapshot_download", combined)
+        self.assertNotIn("AutoTokenizer", combined)
+        self.assertNotIn("AutoModel", combined)
+        self.assertNotIn("optimizer.step", combined)
+        self.assertNotIn("loss.backward", combined)
+        code_nodes = [ast.parse(source) for cell, source in zip(notebook["cells"], cells)
+                      if cell["cell_type"] == "code"]
+        imports = [node for tree in code_nodes for node in ast.walk(tree)
+                   if isinstance(node, (ast.Import, ast.ImportFrom))]
+        imported = " ".join(
+            (alias.name for node in imports for alias in node.names)
+        ) + " " + " ".join(node.module or "" for node in imports if isinstance(node, ast.ImportFrom))
+        self.assertNotIn("expert_adapters.expert", imported)
+        self.assertNotIn("extract_expert", imported)
+        self.assertEqual(metadata["dataset_sources"], [
+            "qnv8071/moescore-full8-artifacts", "qnv8071/xacle-2027-data",
+        ])
+        self.assertEqual(metadata["id"], "qnv8071/xacle-2027-d01-moe8-convex-envelope-diagnostics")
+        self.assertEqual(metadata["is_private"], "true")
+        self.assertEqual(metadata["enable_gpu"], "false")
+        self.assertEqual(metadata["enable_tpu"], "false")
+        self.assertEqual(metadata["enable_internet"], "true")
+        self.assertNotIn("machine_shape", metadata)
+
+        source_cell = next(source for source in cells if "SOURCE_COMMIT =" in source)
+        source_commit = next(ast.literal_eval(node.value) for tree in [ast.parse(source_cell)]
+                             for node in ast.walk(tree)
+                             if isinstance(node, ast.Assign) and any(
+                                 isinstance(target, ast.Name) and target.id == "SOURCE_COMMIT"
+                                 for target in node.targets))
+        self.assertEqual(len(source_commit), 40)
+        source = subprocess.check_output(
+            ["git", "show", f"{source_commit}:scripts/diagnostics/d01_moe8.py"], cwd=root, text=True
+        )
+        self.assertIn("def discover_frozen_artifacts(", source)
+
+        parsed_calls = []
+        for cell_index, source in enumerate(cells):
+            if notebook["cells"][cell_index]["cell_type"] != "code":
+                continue
+            tree = ast.parse(source)
+            parsed_calls.extend((cell_index, node) for node in ast.walk(tree) if isinstance(node, ast.Call))
+        gate_calls = [(i, node) for i, node in parsed_calls
+                      if isinstance(node.func, ast.Name) and node.func.id == "load_gate_checkpoint_for_d01"]
+        self.assertEqual(len(gate_calls), 1)
+        kwargs = {item.arg: item.value for item in gate_calls[0][1].keywords}
+        self.assertIn("expected_expert_checkpoint_provenance", kwargs)
+        self.assertIn("checkpoint_compat_source_hashes", kwargs)
+        test_csv_write = next(i for i, node in parsed_calls if isinstance(node.func, ast.Name)
+                              and node.func.id == "write_prediction_csv"
+                              and "test_d01.csv" in ast.unparse(node))
+        test_metadata_read = next(i for i, node in parsed_calls if isinstance(node.func, ast.Name)
+                                  and node.func.id == "read_aligned_public_metadata"
+                                  and any(isinstance(arg, ast.Constant) and arg.value == "test"
+                                          for arg in node.args)
+                                  and any(k.arg == "include_labels" and isinstance(k.value, ast.Constant)
+                                          and k.value.value is True for k in node.keywords))
+        self.assertLess(test_csv_write, test_metadata_read)
+
+    def test_notebook_source_and_kernel_metadata_match_and_have_no_training_or_extraction_calls(self):
+        root = Path(__file__).resolve().parents[1]
+        notebook = json.loads((root / "notebooks/XACLE2027_D01_MOE8_Kaggle.ipynb").read_text())
+        packaged = json.loads((root / "kaggle/d01_moe8/XACLE2027_D01_MOE8_Kaggle.ipynb").read_text())
+        self.assertEqual(packaged, notebook)
+
+
+class D01FrozenArtifactTests(unittest.TestCase):
+    def _write_artifacts(self, root, *, duplicate_gate=False):
+        gate_root = root / "moe8_gate/moe8_gate"
+        gate_root.mkdir(parents=True)
+        (gate_root / "best_gate.pt").write_bytes(b"checkpoint")
+        (gate_root / "moe_full8.yaml").write_text("data:\n  profile: full_8\n")
+        (gate_root / "run_manifest.json").write_text("{}")
+        if duplicate_gate:
+            other = root / "duplicate"
+            other.mkdir()
+            (other / "best_gate.pt").write_bytes(b"other")
+        store = root / "moescore_full8_store/full8_store"
+        for split in ("train", "validation", "test"):
+            (store / split).mkdir(parents=True)
+            (store / split / "manifest.json").write_text(json.dumps({"expert_profile": "full_8"}))
+        return gate_root, store
+
+    def _paired_fixture(self):
+        source = {"model/moe_gating_core.py": "a" * 64}
+        provenance = {f"expert{i}": {"checkpoint_sha256": f"{i:064x}"} for i in range(1, 9)}
+        identities = {"train": "1" * 64, "validation": "2" * 64, "test": "3" * 64}
+        contract = {"core_assembly_contract": "full8_v1"}
+        checkpoint_sha = "c" * 64
+        payload = {
+            "format_version": 7, "expert_profile": "full_8",
+            "expert_order": [f"expert{i}" for i in range(1, 9)],
+            "expert_feature_dimensions": {
+                "expert1": 2049, "expert2": 4097, "expert3": 3840, "expert4": 1024,
+                "expert5": 11267, "expert6": 4609, "expert7": 3073, "expert8": 3073,
+            },
+            "gate_input_dim": 33032, "gate_expert_count": 8,
+            "gate_architecture": FULL8_GATE_ARCHITECTURE,
+            "source_code_sha256": source,
+            "expert_checkpoint_provenance": provenance,
+            "feature_store_identity": {**identities, "preprocessing_contract": contract},
+        }
+        run = {
+            "git_commit": "d" * 40, "expert_profile": "full_8",
+            "gate_checkpoint_sha256": checkpoint_sha,
+            "source_code_sha256": source,
+            "expert_checkpoint_provenance": provenance,
+            "train_store_identity_sha256": identities["train"],
+            "validation_store_identity_sha256": identities["validation"],
+        }
+        manifests = {
+            split: {
+                "split": split, "expert_profile": "full_8",
+                "expert_order": [f"expert{i}" for i in range(1, 9)],
+                "feature_width": 33032, "score_width": 8,
+                "feature_dimensions": {
+                    "expert1": 2049, "expert2": 4097, "expert3": 3840, "expert4": 1024,
+                    "expert5": 11267, "expert6": 4609, "expert7": 3073, "expert8": 3073,
+                },
+                "store_identity_sha256": identities[split],
+                "source_manifest_sha256": {"train": "e", "validation": "f", "test": "0"}[split] * 64,
+                "labels_present": split != "test",
+                "checkpoint_provenance": provenance,
+                "preprocessing_contract": contract,
+                "sample_count": count,
+                "shards": [{"count": count}],
+                "assembly_identity": {"ordered_source_fingerprints": [
+                    {"sample_id": f"{split}:same.wav", "wav_sha256": "a" * 64},
+                ]},
+            }
+            for split, count in (("train", 7500), ("validation", 3000), ("test", 3000))
+        }
+        contracts = {split: contract for split in manifests}
+        return checkpoint_sha, payload, run, manifests, source, contracts
+
+    def test_resolves_only_the_requested_dataset_mount(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected = root / "datasets/qnv8071/moescore-full8-artifacts"
+            expected.mkdir(parents=True)
+            self.assertEqual(resolve_dataset_mount(root, "moescore-full8-artifacts"), expected)
+
+    def test_rejects_missing_or_ambiguous_dataset_mount(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaises(FileNotFoundError):
+                resolve_dataset_mount(root, "moescore-full8-artifacts")
+            (root / "moescore-full8-artifacts").mkdir()
+            (root / "qnv8071/moescore-full8-artifacts").mkdir(parents=True)
+            with self.assertRaisesRegex(ValueError, "ambiguous"):
+                resolve_dataset_mount(root, "moescore-full8-artifacts")
+
+    def test_discovers_nested_checkpoint_config_run_and_full8_store(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gate, store = self._write_artifacts(root)
+            found = discover_frozen_artifacts(root)
+            self.assertEqual(found, {
+                "gate_checkpoint": gate / "best_gate.pt",
+                "gate_config": gate / "moe_full8.yaml",
+                "run_manifest": gate / "run_manifest.json",
+                "feature_store": store,
+            })
+
+    def test_artifact_discovery_rejects_missing_or_ambiguous_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_artifacts(root)
+            (root / "moe8_gate/moe8_gate/best_gate.pt").unlink()
+            with self.assertRaises(FileNotFoundError):
+                discover_frozen_artifacts(root)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_artifacts(root, duplicate_gate=True)
+            with self.assertRaisesRegex(ValueError, "ambiguous"):
+                discover_frozen_artifacts(root)
+
+    def test_artifact_discovery_rejects_missing_or_ambiguous_full8_store(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_artifacts(root)
+            for split in ("train", "validation", "test"):
+                (root / "moescore_full8_store/full8_store" / split / "manifest.json").unlink()
+            with self.assertRaisesRegex(FileNotFoundError, "Full8"):
+                discover_frozen_artifacts(root)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_artifacts(root)
+            duplicate = root / "duplicate_store"
+            for split in ("train", "validation", "test"):
+                folder = duplicate / split
+                folder.mkdir(parents=True)
+                (folder / "manifest.json").write_text(json.dumps({"expert_profile": "full_8"}))
+            with self.assertRaisesRegex(ValueError, "ambiguous"):
+                discover_frozen_artifacts(root)
+
+    def test_valid_paired_format7_gate_and_three_splits_are_accepted(self):
+        values = self._paired_fixture()
+        validate_frozen_artifact_pair(*values[:4], verified_source_hashes=values[4],
+                                      preprocessing_contracts=values[5])
+
+    def test_gate_checkpoint_hash_and_store_identity_mismatches_are_rejected(self):
+        values = list(self._paired_fixture())
+        values[0] = "f" * 64
+        with self.assertRaisesRegex(ValueError, "checkpoint SHA-256"):
+            validate_frozen_artifact_pair(*values[:4], verified_source_hashes=values[4],
+                                          preprocessing_contracts=values[5])
+        values = list(self._paired_fixture())
+        values[3]["validation"]["store_identity_sha256"] = "f" * 64
+        with self.assertRaisesRegex(ValueError, "validation.*identity"):
+            validate_frozen_artifact_pair(*values[:4], verified_source_hashes=values[4],
+                                          preprocessing_contracts=values[5])
+
+    def test_incompatible_gate_architecture_order_dimensions_and_provenance_fail(self):
+        for field, value, message in (
+            ("gate_expert_count", 10, "architecture"),
+            ("gate_input_dim", 33031, "architecture"),
+            ("expert_order", [f"expert{i}" for i in range(8, 0, -1)], "architecture"),
+        ):
+            values = list(self._paired_fixture())
+            values[1][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, message):
+                validate_frozen_artifact_pair(*values[:4], verified_source_hashes=values[4],
+                                              preprocessing_contracts=values[5])
+        values = list(self._paired_fixture())
+        values[3]["test"]["checkpoint_provenance"] = {
+            **values[3]["test"]["checkpoint_provenance"],
+            "expert8": {"checkpoint_sha256": "f" * 64},
+        }
+        with self.assertRaisesRegex(ValueError, "checkpoint provenance"):
+            validate_frozen_artifact_pair(*values[:4], verified_source_hashes=values[4],
+                                          preprocessing_contracts=values[5])
+
+    def test_invalid_full8_split_contracts_fail_without_rejecting_overlap(self):
+        values = list(self._paired_fixture())
+        validate_frozen_artifact_pair(*values[:4], verified_source_hashes=values[4],
+                                      preprocessing_contracts=values[5])
+        self.assertEqual(sum(m["shards"][0]["count"] for m in values[3].values()), 13500)
+        for field, value in (("expert_profile", "full_9"), ("feature_width", 33031),
+                             ("score_width", 10), ("labels_present", True)):
+            values = list(self._paired_fixture())
+            values[3]["test"][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                validate_frozen_artifact_pair(*values[:4], verified_source_hashes=values[4],
+                                              preprocessing_contracts=values[5])
+
+    def test_source_identity_must_match_run_manifest_checkpoint_and_verified_commit(self):
+        values = list(self._paired_fixture())
+        values[4] = {"model/moe_gating_core.py": "b" * 64}
+        with self.assertRaisesRegex(ValueError, "source-code hashes"):
+            validate_frozen_artifact_pair(*values[:4], verified_source_hashes=values[4],
+                                          preprocessing_contracts=values[5])
+
+    def test_official_metadata_aligns_by_filename_and_rejects_mismatched_labels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "train.csv"
+            path.write_text(
+                "wav_file_name,average_score,model_ID,model_name\n"
+                "00001.wav,4.5,gen-a,A\n00000.wav,3.0,gen-b,B\n",
+                encoding="utf-8",
+            )
+            result = read_aligned_public_metadata(
+                path, "train", ["train:00000.wav", "train:00001.wav"],
+                ["00000.wav", "00001.wav"], include_labels=True,
+            )
+            self.assertEqual(result["labels_raw"], [3.0, 4.5])
+            self.assertEqual(result["model_ids"], ["gen-b", "gen-a"])
+            with self.assertRaisesRegex(ValueError, "sample alignment|WAV filenames"):
+                read_aligned_public_metadata(
+                    path, "train", ["train:00000.wav", "train:00001.wav"],
+                    ["00000.wav", "missing.wav"], include_labels=True,
+                )
+
+    def test_test_metadata_can_be_joined_without_reading_labels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "test.csv"
+            path.write_text("wav_file_name,average_score,model_name\na.wav,9.0,G\n", encoding="utf-8")
+            result = read_aligned_public_metadata(
+                path, "test", ["test:a.wav"], ["a.wav"], include_labels=False,
+            )
+            self.assertIsNone(result["labels_raw"])
+            self.assertEqual(result["model_names"], ["G"])
 
 
 if __name__ == "__main__":

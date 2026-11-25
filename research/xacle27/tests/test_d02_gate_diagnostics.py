@@ -268,6 +268,7 @@ class D02GateDiagnosticsTests(unittest.TestCase):
         path = Path(__file__).parents[3] / "notebooks/kaggle/xacle2027-d02-moe8-gate-diagnostics/kernel-metadata.json"
         metadata = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(metadata["id"], "qnv8071/xacle2027-d02-moe8-gate-diagnostics")
+        self.assertEqual(metadata["title"], "XACLE2027 D02 MOE8 Gate Diagnostics")
         self.assertEqual(metadata["kernel_type"], "notebook")
         self.assertEqual(
             set(metadata["dataset_sources"]),

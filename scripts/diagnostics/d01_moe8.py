@@ -43,6 +43,211 @@ FULL8_GATE_ARCHITECTURE = {
     "activation": "ReLU", "dropout": 0.1, "output_width": 8,
     "output": "Softmax(dim=-1)",
 }
+PUBLIC_SPLIT_SAMPLE_COUNTS = {"train": 7500, "validation": 3000, "test": 3000}
+
+
+def resolve_dataset_mount(input_root: str | Path, dataset_slug: str, owner: str = "qnv8071") -> Path:
+    """Resolve one known Kaggle dataset mount without scanning unrelated inputs."""
+    if (not isinstance(dataset_slug, str) or not dataset_slug
+            or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789-" for char in dataset_slug)):
+        raise ValueError("dataset_slug must be a verified Kaggle slug")
+    root = Path(input_root).expanduser().resolve()
+    candidates = (root / dataset_slug, root / owner / dataset_slug,
+                  root / "datasets" / owner / dataset_slug)
+    found = sorted({path.resolve() for path in candidates if path.is_dir()})
+    if not found:
+        raise FileNotFoundError(f"Kaggle dataset mount {owner}/{dataset_slug} was not found")
+    if len(found) != 1:
+        raise ValueError(f"Kaggle dataset mount {owner}/{dataset_slug} is ambiguous: {found}")
+    return found[0]
+
+
+def _one_artifact(paths: Sequence[Path], name: str) -> Path:
+    found = sorted({path.resolve() for path in paths if path.is_file()})
+    if not found:
+        raise FileNotFoundError(f"required frozen artifact is missing: {name}")
+    if len(found) != 1:
+        raise ValueError(f"frozen artifact is ambiguous ({name}): {found}")
+    return found[0]
+
+
+def discover_frozen_artifacts(dataset_root: str | Path) -> dict[str, Path]:
+    """Find the one paired Gate/config/run and Full8 store inside its dataset."""
+    import json
+
+    root = Path(dataset_root).expanduser().resolve()
+    checkpoint = _one_artifact(list(root.rglob("best_gate.pt")), "best_gate.pt")
+    config = _one_artifact(list(root.rglob("moe_full8.yaml")), "moe_full8.yaml")
+    run_manifest = _one_artifact(list(root.rglob("run_manifest.json")), "run_manifest.json")
+    if not (checkpoint.parent == config.parent == run_manifest.parent):
+        raise ValueError("Gate checkpoint, configuration and run manifest are not colocated")
+
+    stores = []
+    for manifest_path in root.rglob("manifest.json"):
+        if manifest_path.parent.name != "train":
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"cannot inspect candidate Full8 manifest {manifest_path}: {exc}") from exc
+        store_root = manifest_path.parent.parent.resolve()
+        if manifest.get("expert_profile") == "full_8" and all(
+            (store_root / split / "manifest.json").is_file()
+            for split in ("train", "validation", "test")
+        ):
+            stores.append(store_root)
+    stores = sorted(set(stores))
+    if not stores:
+        raise FileNotFoundError(f"complete Full8 train/validation/test store not found under {root}")
+    if len(stores) != 1:
+        raise ValueError(f"Full8 store is ambiguous under {root}: {stores}")
+    return {
+        "gate_checkpoint": checkpoint,
+        "gate_config": config,
+        "run_manifest": run_manifest,
+        "feature_store": stores[0],
+    }
+
+
+def _is_sha256(value: Any) -> bool:
+    return (isinstance(value, str) and len(value) == 64
+            and all(char in "0123456789abcdef" for char in value.lower()))
+
+
+def validate_frozen_artifact_pair(
+    checkpoint_sha256: str,
+    checkpoint: Mapping[str, Any],
+    run_manifest: Mapping[str, Any],
+    manifests: Mapping[str, Mapping[str, Any]],
+    *,
+    verified_source_hashes: Mapping[str, str],
+    preprocessing_contracts: Mapping[str, Any],
+) -> None:
+    """Check the frozen format-7 Gate against its paired, prevalidated Full8 splits."""
+    from model.expert_adapters.registry import profile_contract
+
+    splits = ("train", "validation", "test")
+    order, dimensions, width = profile_contract("full_8")
+    expected_order = list(order)
+    if not _is_sha256(checkpoint_sha256) or run_manifest.get("gate_checkpoint_sha256") != checkpoint_sha256:
+        raise ValueError("Gate checkpoint SHA-256 does not match the paired run manifest")
+    if (checkpoint.get("format_version") != FULL8_INFERENCE_COMPAT_FORMAT_VERSION
+            or checkpoint.get("expert_profile") != "full_8"
+            or checkpoint.get("expert_order") != expected_order
+            or checkpoint.get("expert_feature_dimensions") != dimensions
+            or checkpoint.get("gate_input_dim") != width
+            or checkpoint.get("gate_expert_count") != len(expected_order)
+            or checkpoint.get("gate_architecture") != FULL8_GATE_ARCHITECTURE):
+        raise ValueError("Gate checkpoint Full8 architecture or expert contract is incompatible")
+    if run_manifest.get("expert_profile") != "full_8":
+        raise ValueError("Gate run manifest does not declare the Full8 profile")
+
+    recorded_sources = checkpoint.get("source_code_sha256")
+    if (not isinstance(recorded_sources, Mapping) or not recorded_sources
+            or dict(recorded_sources) != dict(run_manifest.get("source_code_sha256", {}))
+            or dict(recorded_sources) != dict(verified_source_hashes)
+            or any(not _is_sha256(digest) for digest in recorded_sources.values())):
+        raise ValueError("Gate checkpoint, run manifest and verified source-code hashes differ")
+
+    provenance = checkpoint.get("expert_checkpoint_provenance")
+    identity = checkpoint.get("feature_store_identity")
+    if not isinstance(provenance, Mapping) or not isinstance(identity, Mapping):
+        raise ValueError("Gate checkpoint is missing expert provenance or feature-store identity")
+    if dict(run_manifest.get("expert_checkpoint_provenance", {})) != dict(provenance):
+        raise ValueError("Gate run manifest expert checkpoint provenance differs from checkpoint")
+    if set(manifests) != set(splits) or set(preprocessing_contracts) != set(splits):
+        raise ValueError("paired artifact validation requires train, validation and test manifests")
+    if identity.get("preprocessing_contract") != preprocessing_contracts["train"]:
+        raise ValueError("Gate preprocessing contract differs from the Full8 feature store")
+    if any(preprocessing_contracts[split] != preprocessing_contracts["train"] for split in splits[1:]):
+        raise ValueError("Full8 preprocessing contracts differ across public splits")
+
+    expected_identities = {
+        "train": ("train_store_identity_sha256",),
+        "validation": ("validation_store_identity_sha256",),
+    }
+    for split in splits:
+        manifest = manifests[split]
+        if (manifest.get("split") != split or manifest.get("expert_profile") != "full_8"
+                or manifest.get("expert_order") != expected_order
+                or manifest.get("feature_dimensions") != dimensions
+                or manifest.get("feature_width") != width
+                or manifest.get("score_width") != len(expected_order)
+                or manifest.get("labels_present") is not (split != "test")):
+            raise ValueError(f"{split}: Full8 split, labels, expert order or dimensions are incompatible")
+        if manifest.get("checkpoint_provenance") != provenance:
+            raise ValueError(f"{split}: expert checkpoint provenance differs from the frozen Gate")
+        if not _is_sha256(manifest.get("source_manifest_sha256")) or not _is_sha256(
+            manifest.get("store_identity_sha256")
+        ):
+            raise ValueError(f"{split}: source or store identity SHA-256 is invalid")
+        if sum(shard.get("count", 0) for shard in manifest.get("shards", [])) != PUBLIC_SPLIT_SAMPLE_COUNTS[split]:
+            raise ValueError(f"{split}: Full8 sample count differs from the public split contract")
+        if split in expected_identities:
+            identity_key, = expected_identities[split]
+            actual = manifest["store_identity_sha256"]
+            if (identity.get(split) != actual or run_manifest.get(identity_key) != actual):
+                raise ValueError(f"{split}: paired Gate and Full8 store identity mismatch")
+
+
+def read_aligned_public_metadata(
+    path: str | Path,
+    split: str,
+    sample_ids: Sequence[str],
+    wave_file_names: Sequence[str],
+    *,
+    include_labels: bool,
+) -> dict[str, Any]:
+    """Align official metadata to feature-store order by unique WAV filename."""
+    if split not in {"train", "validation", "test"}:
+        raise ValueError("split must be train, validation or test")
+    if len(sample_ids) != len(wave_file_names) or len(set(sample_ids)) != len(sample_ids):
+        raise ValueError("feature-store sample alignment is malformed")
+    if any(sample_id != f"{split}:{filename}" for sample_id, filename in zip(sample_ids, wave_file_names)):
+        raise ValueError("feature-store sample IDs do not match ordered WAV filenames")
+    with Path(path).open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        fields = {str(name).strip().lower(): name for name in (reader.fieldnames or [])}
+        filename_field = fields.get("wav_file_name") or fields.get("wav_filename")
+        if filename_field is None:
+            raise ValueError("official metadata has no WAV filename column")
+        rows_by_name: dict[str, Mapping[str, Any]] = {}
+        for row in reader:
+            filename = (row.get(filename_field) or "").strip()
+            if not filename or filename in rows_by_name:
+                raise ValueError("official metadata contains an empty or duplicate WAV filename")
+            rows_by_name[filename] = row
+    if set(rows_by_name) != set(wave_file_names):
+        raise ValueError(f"{split}: official metadata sample alignment differs from Full8 rows")
+
+    ordered = [rows_by_name[name] for name in wave_file_names]
+    model_id_field = fields.get("model_id")
+    model_name_field = fields.get("model_name")
+    result: dict[str, Any] = {
+        "model_ids": ([row[model_id_field].strip() for row in ordered]
+                      if model_id_field and all((row.get(model_id_field) or "").strip() for row in ordered)
+                      else None),
+        "model_names": ([row[model_name_field].strip() for row in ordered]
+                        if model_name_field and all((row.get(model_name_field) or "").strip() for row in ordered)
+                        else None),
+        "labels_raw": None,
+    }
+    if include_labels:
+        label_field = next((fields[name] for name in (
+            "average_score", "average_semantic_alignment_score", "average_semantic_alignement_score"
+        ) if name in fields), None)
+        raw_labels = [(row.get(label_field) or "").strip() for row in ordered] if label_field else []
+        if label_field and any(raw_labels) and not all(raw_labels):
+            raise ValueError(f"{split}: official labels are only partially populated")
+        if label_field and raw_labels:
+            try:
+                labels = [float(value) for value in raw_labels]
+            except ValueError as exc:
+                raise ValueError(f"{split}: official labels are not numeric") from exc
+            if not np.isfinite(labels).all() or any(not 0.0 <= value <= 10.0 for value in labels):
+                raise ValueError(f"{split}: official labels are outside raw [0,10] range")
+            result["labels_raw"] = labels
+    return result
 
 
 def prepare_format7_gate_payload(
@@ -627,6 +832,19 @@ def summarize_by_generator(
     return rows
 
 
+def classification_counts_for_score_bin(
+    analysis: Mapping[str, Any], labels_raw: Any, lower: float, upper: float,
+    *, include_upper: bool = False,
+) -> dict[str, int]:
+    """Count A/B/C/D only among labels in the requested raw-score bin."""
+    labels = _numeric(labels_raw, "labels_raw")
+    classes = np.asarray(analysis.get("classification", {}).get("per_sample", []), dtype="U1")
+    if labels.ndim != 1 or labels.shape != classes.shape or lower > upper:
+        raise ValueError("score-bin labels and classifications must be aligned vectors")
+    selected = (labels >= lower) & ((labels <= upper) if include_upper else (labels < upper))
+    return {name: int(np.sum(selected & (classes == name))) for name in "ABCD"}
+
+
 def build_prediction_rows(
     sample_ids: Sequence[str],
     split: str,
@@ -634,6 +852,7 @@ def build_prediction_rows(
     gate_weights: Any,
     analysis: Mapping[str, Any],
     *,
+    wave_file_names: Sequence[str] | None = None,
     labels_raw: Any | None = None,
     model_ids: Sequence[Any] | None = None,
     model_names: Sequence[Any] | None = None,
@@ -652,6 +871,11 @@ def build_prediction_rows(
         raise ValueError("sample_ids must be unique")
     if any(not sample_id.startswith(split + ":") for sample_id in ids):
         raise ValueError("sample_ids do not match the requested split")
+    if wave_file_names is not None and (
+        len(wave_file_names) != count
+        or any(sample_id != f"{split}:{filename}" for sample_id, filename in zip(ids, wave_file_names))
+    ):
+        raise ValueError("wave_file_names must align with sample IDs in feature-store order")
     labels = None if labels_raw is None else _numeric(labels_raw, "labels_raw")
     if labels is not None and (labels.shape != (count,) or np.any((labels < 0) | (labels > 10))):
         raise ValueError("labels_raw must be finite [N] on the original [0,10] scale")
@@ -671,6 +895,8 @@ def build_prediction_rows(
             "split": split,
             "label_raw": "" if labels is None else float(labels[i]),
         }
+        if wave_file_names is not None:
+            row["wave_file_name"] = wave_file_names[i]
         if model_ids is not None:
             row["model_id"] = str(model_ids[i])
         if model_names is not None:
@@ -818,18 +1044,24 @@ __all__ = [
     "FULL8_INFERENCE_COMPAT_FORMAT_VERSION",
     "FULL8_INFERENCE_COMPAT_SOURCE_FILES",
     "FULL8_GATE_ARCHITECTURE",
+    "PUBLIC_SPLIT_SAMPLE_COUNTS",
     "NORMALIZED_SCORE_SCALE",
     "RAW_SCORE_SCALE",
     "SCORE_BINS",
     "TAIL_BINS",
     "analyze_split",
     "build_prediction_rows",
+    "classification_counts_for_score_bin",
     "compute_envelope_diagnostics",
+    "discover_frozen_artifacts",
     "denormalize_scores",
     "load_gate_checkpoint_for_d01",
     "normalize_raw_scores",
     "prepare_format7_gate_payload",
+    "read_aligned_public_metadata",
+    "resolve_dataset_mount",
     "summarize_by_generator",
+    "validate_frozen_artifact_pair",
     "validate_d01_feature_store",
     "write_prediction_csv",
 ]

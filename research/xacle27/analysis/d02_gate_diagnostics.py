@@ -272,6 +272,8 @@ def join_metadata_by_filename(
     meta["_join_filename"] = meta[key].map(_basename)
     if pred["_join_filename"].isna().any() or meta["_join_filename"].isna().any():
         raise ValueError("metadata join contains missing wave filenames")
+    if pred["_join_filename"].duplicated().any() or meta["_join_filename"].duplicated().any():
+        raise ValueError("metadata join contains duplicated wave filenames")
     missing = set(pred["_join_filename"]) - set(meta["_join_filename"])
     extra = set(meta["_join_filename"]) - set(pred["_join_filename"])
     if missing or extra:
@@ -352,16 +354,20 @@ def gate_weights_by_expert(rows: pd.DataFrame) -> pd.DataFrame:
 
 
 def generator_summary(rows: pd.DataFrame) -> pd.DataFrame:
-    _require_labels(rows)
     if "model_id" not in rows or rows["model_id"].isna().any():
         raise ValueError("generator summary requires joined model_id values")
     output = []
     for model_id, group in rows.groupby("model_id", sort=True):
-        labels = group["ground_truth_score"].to_numpy(dtype=float)
         prediction = group["predicted_score"].to_numpy(dtype=float)
-        srcc, srcc_status = _spearman(labels, prediction)
-        error = prediction - labels
-        high = labels >= 9.0
+        has_labels = "ground_truth_score" in group and group["ground_truth_score"].notna().all()
+        if has_labels:
+            labels = group["ground_truth_score"].to_numpy(dtype=float)
+            srcc, srcc_status = _spearman(labels, prediction)
+            error = prediction - labels
+            high = labels >= 9.0
+        else:
+            srcc, srcc_status = None, "undefined_no_labels"
+            error, high = None, None
         row = {
             "model_id": str(model_id),
             "model_name": _first_nonempty(group.get("model_name")),
@@ -373,10 +379,12 @@ def generator_summary(rows: pd.DataFrame) -> pd.DataFrame:
             "mean_effective_experts": float(group["effective_experts"].mean()),
             "srcc": srcc,
             "srcc_status": srcc_status,
-            "mse": float(np.square(error).mean()),
-            "mae": float(np.abs(error).mean()),
-            "mean_prediction_bias": float(error.mean()),
-            "high_score_underprediction_rate": float(np.mean(prediction[high] < 9.0)) if high.any() else None,
+            "mse": float(np.square(error).mean()) if has_labels else None,
+            "mae": float(np.abs(error).mean()) if has_labels else None,
+            "mean_prediction_bias": float(error.mean()) if has_labels else None,
+            "high_score_underprediction_rate": (
+                float(np.mean(prediction[high] < 9.0)) if high.any() else None
+            ) if has_labels else None,
         }
         for index in range(1, 9):
             row[f"mean_gate_weight_{index}"] = float(group[f"gate_weight_{index}"].mean())

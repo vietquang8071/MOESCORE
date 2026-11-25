@@ -26,6 +26,8 @@ def main(argv=None) -> int:
                         help="Allow known train/validation WAV duplicates for this research run only")
     parser.add_argument("--allow-public-split-audio-overlap", action="store_true",
                         help="D01 diagnostic-only: retain and allow identical WAV hashes across official public splits")
+    parser.add_argument("--skip-cross-split-audio-overlap-check", action="store_true",
+                        help="D02-only: skip all cross-split WAV overlap diagnostics")
     parser.add_argument("--report-json")
     args = parser.parse_args(argv)
     try:
@@ -35,6 +37,7 @@ def main(argv=None) -> int:
             allow_public_split_audio_overlap=args.allow_public_split_audio_overlap,
             splits=tuple(dict.fromkeys(args.split or ("train", "validation", "test"))),
             expert8_cache_id=args.expert8_cache_id,
+            skip_cross_split_audio_overlap_check=args.skip_cross_split_audio_overlap_check,
         )
     except Exception as exc:
         report = {"status": "FAIL", "error": f"{type(exc).__name__}: {exc}"}

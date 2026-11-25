@@ -192,52 +192,68 @@ def build_full8_stores(
     allow_public_split_audio_overlap: bool = False,
     splits: tuple[str, ...] = ("train", "validation", "test"),
     expert8_cache_id: str | None = None,
+    skip_cross_split_audio_overlap_check: bool = False,
 ) -> dict[str, Any]:
     if (type(allow_train_validation_audio_overlap) is not bool
-            or type(allow_public_split_audio_overlap) is not bool):
+            or type(allow_public_split_audio_overlap) is not bool
+            or type(skip_cross_split_audio_overlap_check) is not bool):
         raise ValueError("audio overlap policies must be boolean")
+    splits = tuple(dict.fromkeys(splits))
+    if not splits or any(split not in {"train", "validation", "test"} for split in splits):
+        raise ValueError("splits must contain train, validation, and/or test")
+    selected_splits = splits if skip_cross_split_audio_overlap_check else ("train", "validation", "test")
     full7_manifests = {
         split: validate_feature_store(full7_root, split=split, require_labels=split != "test")
-        for split in ("train", "validation", "test")
+        for split in selected_splits
     }
-    train_rows = full7_manifests["train"]["assembly_identity"]["ordered_source_fingerprints"]
-    val_rows = full7_manifests["validation"]["assembly_identity"]["ordered_source_fingerprints"]
-    test_rows = full7_manifests["test"]["assembly_identity"]["ordered_source_fingerprints"]
-    from data.audio_overlap import (
-        build_public_split_audio_overlap_diagnostic,
-        build_train_validation_audio_overlap_diagnostic,
-        emit_audio_overlap_warning,
-        emit_public_split_audio_overlap_warning,
-        raise_for_audio_overlap,
-        raise_for_public_split_audio_overlap,
-    )
-    diagnostic = build_train_validation_audio_overlap_diagnostic(
-        train_rows, val_rows,
-        allow_train_validation_audio_overlap=(allow_train_validation_audio_overlap
-                                              or allow_public_split_audio_overlap),
-    )
-    if diagnostic["overlapping_sha256_count"]:
-        if not (allow_train_validation_audio_overlap or allow_public_split_audio_overlap):
-            raise_for_audio_overlap(diagnostic, stage="Full8 builder")
-        emit_audio_overlap_warning(diagnostic, stage="Full8 builder")
-    public_diagnostic = build_public_split_audio_overlap_diagnostic(
-        {"train": train_rows, "validation": val_rows, "test": test_rows},
-        allow_public_split_audio_overlap=allow_public_split_audio_overlap,
-        allow_train_validation_audio_overlap=allow_train_validation_audio_overlap,
-    )
-    if public_diagnostic["status"] == "ERROR":
-        raise_for_public_split_audio_overlap(public_diagnostic, stage="Full8 builder")
-    if public_diagnostic["status"] == "WARNING":
-        emit_public_split_audio_overlap_warning(public_diagnostic, stage="Full8 builder")
+    diagnostic = public_diagnostic = None
+    if not skip_cross_split_audio_overlap_check:
+        train_rows = full7_manifests["train"]["assembly_identity"]["ordered_source_fingerprints"]
+        val_rows = full7_manifests["validation"]["assembly_identity"]["ordered_source_fingerprints"]
+        test_rows = full7_manifests["test"]["assembly_identity"]["ordered_source_fingerprints"]
+        from data.audio_overlap import (
+            build_public_split_audio_overlap_diagnostic,
+            build_train_validation_audio_overlap_diagnostic,
+            emit_audio_overlap_warning,
+            emit_public_split_audio_overlap_warning,
+            raise_for_audio_overlap,
+            raise_for_public_split_audio_overlap,
+        )
+        diagnostic = build_train_validation_audio_overlap_diagnostic(
+            train_rows, val_rows,
+            allow_train_validation_audio_overlap=(allow_train_validation_audio_overlap
+                                                  or allow_public_split_audio_overlap),
+        )
+        if diagnostic["overlapping_sha256_count"]:
+            if not (allow_train_validation_audio_overlap or allow_public_split_audio_overlap):
+                raise_for_audio_overlap(diagnostic, stage="Full8 builder")
+            emit_audio_overlap_warning(diagnostic, stage="Full8 builder")
+        public_diagnostic = build_public_split_audio_overlap_diagnostic(
+            {"train": train_rows, "validation": val_rows, "test": test_rows},
+            allow_public_split_audio_overlap=allow_public_split_audio_overlap,
+            allow_train_validation_audio_overlap=allow_train_validation_audio_overlap,
+        )
+        if public_diagnostic["status"] == "ERROR":
+            raise_for_public_split_audio_overlap(public_diagnostic, stage="Full8 builder")
+        if public_diagnostic["status"] == "WARNING":
+            emit_public_split_audio_overlap_warning(public_diagnostic, stage="Full8 builder")
     reports = [build_full8_split(full7_root, expert8_cache_root, output_root, split=split,
                                  expert8_cache_id=expert8_cache_id)
                for split in splits]
-    return {"status": "PASS", "expert_profile": "full_8", "splits": reports,
-            "allow_train_validation_audio_overlap": allow_train_validation_audio_overlap,
-            "audio_overlap_diagnostic": diagnostic,
-            "allow_public_split_audio_overlap": allow_public_split_audio_overlap,
-            "public_split_audio_overlap_diagnostic": public_diagnostic,
-            "run_purpose": "research_only"}
+    result = {"status": "PASS", "expert_profile": "full_8", "splits": reports,
+              "allow_train_validation_audio_overlap": allow_train_validation_audio_overlap,
+              "allow_public_split_audio_overlap": allow_public_split_audio_overlap,
+              "run_purpose": "research_only"}
+    if skip_cross_split_audio_overlap_check:
+        result["cross_split_audio_overlap"] = {
+            "status": "SKIPPED",
+            "reason": "Explicit D02 research-only configuration",
+            "scope": list(splits),
+        }
+    else:
+        result["audio_overlap_diagnostic"] = diagnostic
+        result["public_split_audio_overlap_diagnostic"] = public_diagnostic
+    return result
 
 
 __all__ = ["build_full8_split", "build_full8_stores"]

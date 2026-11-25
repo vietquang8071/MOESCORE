@@ -169,10 +169,10 @@ class D02GateDiagnosticsTests(unittest.TestCase):
         self.assertEqual(joined.loc[0, "model_id"], "g1")
         with self.assertRaisesRegex(ValueError, "missing"):
             join_metadata_by_filename(predictions, metadata.assign(wav_file_name="missing.wav"))
-        duplicated = join_metadata_by_filename(
-            predictions, pd.concat([metadata, metadata], ignore_index=True)
-        )
-        self.assertEqual(len(duplicated), 2)
+        with self.assertRaisesRegex(ValueError, "duplicated"):
+            join_metadata_by_filename(
+                predictions, pd.concat([metadata, metadata], ignore_index=True)
+            )
 
 
     def test_constant_generator_labels_have_undefined_srcc(self):
@@ -184,6 +184,20 @@ class D02GateDiagnosticsTests(unittest.TestCase):
         summary = generator_summary(rows).iloc[0]
         self.assertTrue(pd.isna(summary["srcc"]))
         self.assertEqual(summary["srcc_status"], "undefined_constant_scores")
+
+    def test_unlabeled_public_generator_summary_keeps_routing_and_skips_label_metrics(self):
+        rows = build_per_sample_frame(
+            ["test:a.wav", "test:b.wav"], ["a.wav", "b.wav"], "test",
+            np.zeros((2, 8), dtype=np.float32), np.full((2, 8), 1 / 8, dtype=np.float32),
+            model_ids=["g1", "g1"],
+        )
+        summary = generator_summary(rows).iloc[0]
+        self.assertEqual(summary["sample_count"], 2)
+        self.assertAlmostEqual(summary["mean_normalized_entropy"], 1.0)
+        self.assertTrue(pd.isna(summary["srcc"]))
+        self.assertEqual(summary["srcc_status"], "undefined_no_labels")
+        self.assertTrue(pd.isna(summary["mse"]))
+        self.assertTrue(pd.isna(summary["mae"]))
 
 
     def test_comparison_uses_matched_controls_and_reports_gap_inversions(self):
@@ -215,7 +229,7 @@ class D02GateDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("xacle2027-evaluation-dataset", source)
         self.assertIn("qnv8071/moe8-bestgate", source)
 
-    def test_notebook_resolves_dataset_leaf_slug_and_allows_cross_split_overlap(self):
+    def test_notebook_resolves_inputs_and_skips_cross_split_audio_checks(self):
         path = Path(__file__).parents[3] / "notebooks/XACLE2027_D02_MOE8_Gate_Diagnostics_Kaggle.ipynb"
         notebook = json.loads(path.read_text(encoding="utf-8"))
         source = "\n".join(
@@ -226,9 +240,20 @@ class D02GateDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("filenames_by_split[left] & filenames_by_split[right]", source)
         self.assertNotIn('set(manifest_ids(result["train"])) &', source)
         self.assertNotIn(".duplicated()", source)
-        self.assertEqual(source.count('cmd.append("--allow-train-validation-audio-overlap")'), 2)
-        self.assertEqual(source.count('cmd.append("--allow-public-split-audio-overlap")'), 2)
+        self.assertEqual(source.count('"--skip-cross-split-audio-overlap-check"'), 2)
+        self.assertNotIn('"--allow-train-validation-audio-overlap"', source)
+        self.assertNotIn('"--allow-public-split-audio-overlap"', source)
+        self.assertIn("RUN_PUBLIC_TEST_ANALYSIS = True", source)
+        self.assertIn("SKIP_CROSS_SPLIT_AUDIO_OVERLAP_CHECK = True", source)
+        self.assertIn('build_splits = list(required_splits)', source)
         self.assertNotIn("if overlap_allowed:", source)
+
+    def test_kaggle_kernel_metadata_updates_existing_public_d02_kernel_only(self):
+        path = Path(__file__).parents[3] / "notebooks/kaggle/xacle2027-d02-moe8-gate-diagnostics/kernel-metadata.json"
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(metadata["id"], "qnv8071/xacle2027-d02-moe8-gate-diagnostics")
+        self.assertEqual(metadata["kernel_type"], "notebook")
+        self.assertNotIn("xacle2027-evaluation-dataset", metadata["dataset_sources"])
 
     def test_dataset_root_finder_handles_repeated_slug_and_reports_missing_mounts(self):
         path = Path(__file__).parents[3] / "notebooks/XACLE2027_D02_MOE8_Gate_Diagnostics_Kaggle.ipynb"

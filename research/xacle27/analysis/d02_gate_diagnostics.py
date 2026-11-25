@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import json
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +22,158 @@ PREDICTION_COLUMNS = {
     "uniform": "uniform_prediction_score",
     "hard_top1": "hard_top1_prediction_score",
 }
+
+
+def resolve_precomputed_full8_artifacts(artifact_root: str | Path) -> dict[str, Path]:
+    """Resolve exactly one MOE8 gate bundle and complete three-split Full8 store."""
+    root = Path(artifact_root).expanduser().resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"Full8 artifacts dataset root is missing: {root}")
+
+    resolved = {}
+    for key, name in (("gate_checkpoint", "best_gate.pt"),
+                      ("gate_config", "moe_full8.yaml"),
+                      ("run_manifest", "run_manifest.json")):
+        matches = sorted(path.resolve() for path in root.rglob(name) if path.is_file())
+        if not matches:
+            raise FileNotFoundError(f"Full8 artifacts dataset is missing {name} under {root}")
+        if len(matches) != 1:
+            raise ValueError(f"ambiguous {name} artifacts under {root}: {matches}")
+        resolved[key] = matches[0]
+
+    candidate_roots = {
+        path.parent.parent.resolve()
+        for path in root.rglob("manifest.json")
+        if path.is_file() and path.parent.name in {"train", "validation", "test"}
+    }
+    full8_roots, unreadable = [], []
+    for store_root in sorted(candidate_roots):
+        manifests = [store_root / split / "manifest.json"
+                     for split in ("train", "validation", "test")
+                     if (store_root / split / "manifest.json").is_file()]
+        profiles = set()
+        for path in manifests:
+            try:
+                profiles.add(json.loads(path.read_text(encoding="utf-8")).get("expert_profile"))
+            except (OSError, json.JSONDecodeError) as exc:
+                unreadable.append(f"{path}: {exc}")
+        if "full_8" in profiles:
+            full8_roots.append(store_root)
+    if not full8_roots:
+        detail = f"; unreadable manifests: {unreadable}" if unreadable else ""
+        raise FileNotFoundError(f"no Full8 feature-store manifests found under {root}{detail}")
+    if len(full8_roots) != 1:
+        raise ValueError(f"ambiguous Full8 feature stores under {root}: {full8_roots}")
+
+    store_root = full8_roots[0]
+    missing = [split for split in ("train", "validation", "test")
+               if not (store_root / split / "manifest.json").is_file()]
+    if missing:
+        raise FileNotFoundError(f"Full8 feature store {store_root} is missing split manifests: {missing}")
+    for split in ("train", "validation", "test"):
+        path = store_root / split / "manifest.json"
+        try:
+            profile = json.loads(path.read_text(encoding="utf-8")).get("expert_profile")
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Full8 {split} manifest is unreadable: {path}: {exc}") from exc
+        if profile != "full_8":
+            raise ValueError(f"Full8 {split} manifest has incompatible expert profile: {profile!r}")
+    resolved["feature_store_root"] = store_root
+    return resolved
+
+
+def validate_full8_manifest_contracts(
+    manifests: Mapping[str, Mapping], *, expected_counts: Mapping[str, int]
+) -> dict[str, Mapping]:
+    """Check profile, row, label, dimension, and identity contracts after store validation."""
+    expected_splits = {"train", "validation", "test"}
+    if set(manifests) != expected_splits or set(expected_counts) != expected_splits:
+        raise ValueError("D02 requires validated train, validation, and test Full8 manifests")
+    order, dimensions, width = profile_contract("full_8")
+    for split in ("train", "validation", "test"):
+        manifest = manifests[split]
+        if not isinstance(manifest, Mapping):
+            raise ValueError(f"{split}: feature-store manifest is not an object")
+        if manifest.get("expert_profile") != "full_8":
+            raise ValueError(f"{split}: feature-store profile is not full_8")
+        if manifest.get("expert_order") != list(order):
+            raise ValueError(f"{split}: Full8 expert order mismatch")
+        if manifest.get("feature_dimensions") != dict(dimensions):
+            raise ValueError(f"{split}: Full8 feature dimensions mismatch")
+        if manifest.get("feature_width") != width:
+            raise ValueError(f"{split}: Full8 feature width must be {width}")
+        if manifest.get("score_width") != len(order):
+            raise ValueError(f"{split}: Full8 score width must be {len(order)}")
+        if manifest.get("split") != split:
+            raise ValueError(f"{split}: manifest split identity mismatch")
+        if manifest.get("labels_present") is not (split != "test"):
+            raise ValueError(f"{split}: labels violate the Full8 split contract")
+        if manifest.get("labels_scale") != ("raw_0_to_10" if split != "test" else None):
+            raise ValueError(f"{split}: label scale contract mismatch")
+        shards = manifest.get("shards")
+        if not isinstance(shards, list) or not shards:
+            raise ValueError(f"{split}: Full8 store has no verified shards")
+        sample_ids, filenames = [], []
+        for shard in shards:
+            if not isinstance(shard, Mapping):
+                raise ValueError(f"{split}: invalid shard entry")
+            ids, names = shard.get("sample_ids"), shard.get("wave_file_names")
+            if (not isinstance(ids, list) or not isinstance(names, list)
+                    or len(ids) != len(names) or shard.get("count") != len(ids)):
+                raise ValueError(f"{split}: shard sample IDs and filenames are misaligned")
+            sample_ids.extend(ids)
+            filenames.extend(names)
+        if len(sample_ids) != expected_counts[split]:
+            raise ValueError(f"{split}: expected {expected_counts[split]} rows, found {len(sample_ids)}")
+        if (any(not isinstance(value, str) or not value.startswith(split + ":") for value in sample_ids)
+                or any(not isinstance(value, str) or not value for value in filenames)):
+            raise ValueError(f"{split}: invalid within-split sample identity")
+        if len(set(sample_ids)) != len(sample_ids) or len(set(filenames)) != len(filenames):
+            raise ValueError(f"{split}: duplicate or invalid within-split sample identity")
+    return dict(manifests)
+
+
+def validate_checkpoint_store_compatibility(
+    checkpoint_payload: Mapping, manifests: Mapping[str, Mapping]
+) -> None:
+    """Bind the frozen gate to the three verified Full8 split stores."""
+    from data.moe_feature_store import preprocessing_contract
+
+    order, dimensions, width = profile_contract("full_8")
+    if (checkpoint_payload.get("expert_profile") != "full_8"
+            or checkpoint_payload.get("expert_order") != list(order)
+            or checkpoint_payload.get("expert_feature_dimensions") != dict(dimensions)
+            or checkpoint_payload.get("gate_input_dim") != width
+            or checkpoint_payload.get("gate_expert_count") != len(order)):
+        raise ValueError("gate checkpoint profile, expert order, or dimensions are not Full8-compatible")
+    provenance = checkpoint_payload.get("expert_checkpoint_provenance")
+    identity = checkpoint_payload.get("feature_store_identity")
+    if not isinstance(provenance, Mapping) or set(provenance) != set(order):
+        raise ValueError("gate checkpoint expert provenance is incomplete")
+    if not isinstance(identity, Mapping) or not all(identity.get(key) for key in (
+        "train", "validation", "preprocessing_contract", "source_sample_ids_by_split",
+        "source_wav_sha256_by_split",
+    )):
+        raise ValueError("gate checkpoint feature-store provenance is incomplete")
+
+    for split in ("train", "validation", "test"):
+        manifest = manifests[split]
+        if manifest.get("checkpoint_provenance") != provenance:
+            raise ValueError(f"{split}: gate checkpoint provenance differs from Full8 store")
+        if preprocessing_contract(manifest) != identity["preprocessing_contract"]:
+            raise ValueError(f"{split}: gate preprocessing contract differs from Full8 store")
+        rows = manifest["assembly_identity"]["ordered_source_fingerprints"]
+        sample_ids = [sample_id for shard in manifest["shards"] for sample_id in shard["sample_ids"]]
+        if [row.get("sample_id") for row in rows] != sample_ids:
+            raise ValueError(f"{split}: source fingerprints do not align with shard sample IDs")
+        if split in ("train", "validation"):
+            if manifest.get("store_identity_sha256") != identity[split]:
+                raise ValueError(f"{split}: store identity differs from gate checkpoint")
+            if sample_ids != identity["source_sample_ids_by_split"].get(split):
+                raise ValueError(f"{split}: sample order differs from gate checkpoint")
+            expected_hashes = identity["source_wav_sha256_by_split"].get(split)
+            if [row.get("wav_sha256") for row in rows] != expected_hashes:
+                raise ValueError(f"{split}: WAV fingerprints differ from gate checkpoint")
 
 
 def validate_full8_contract(
@@ -584,9 +737,12 @@ __all__ = [
     "infer_gate_weights",
     "join_metadata_by_filename",
     "pairwise_inversion_rates",
+    "resolve_precomputed_full8_artifacts",
     "score_bin_summary",
     "validate_checkpoint_cache_provenance",
     "validate_checkpoint_header",
+    "validate_checkpoint_store_compatibility",
     "validate_full8_arrays",
     "validate_full8_contract",
+    "validate_full8_manifest_contracts",
 ]

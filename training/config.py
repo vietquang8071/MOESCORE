@@ -109,8 +109,12 @@ def load_moe_training_config(path: str | Path) -> dict[str, Any]:
     _finite_number(training["learning_rate"], "training.learning_rate", positive=True)
     _finite_number(training["weight_decay"], "training.weight_decay", lower=0.0)
     _finite_number(training["diversity_weight"], "training.diversity_weight")
-    if float(training["diversity_weight"]) != 0.2:
-        raise MoeTrainingConfigError("training.diversity_weight must preserve the original coefficient 0.2")
+    diversity_weight = float(training["diversity_weight"])
+    if diversity_weight != 0.2 and not (data.get("profile") == "full_8" and diversity_weight == 0.0):
+        raise MoeTrainingConfigError(
+            "training.diversity_weight must preserve the original coefficient 0.2 "
+            "(only full_8 permits 0.0 for the G01 ablation)"
+        )
 
     loss = _require_mapping(training["loss"], "training.loss")
     _keys(loss, field="training.loss", allowed={"loss_weights", "clipped_mse", "contrastive"}, required={"loss_weights", "clipped_mse", "contrastive"})

@@ -147,6 +147,7 @@ def prepare_format7_gate_payload(
 def load_gate_checkpoint_for_d01(
     checkpoint_path: str | Path, *, gate: Any,
     expected_expert_checkpoint_provenance: Mapping[str, Any],
+    checkpoint_compat_source_hashes: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
     """Load the frozen gate using pinned validation plus the released v7 adapter."""
     import torch

@@ -1,8 +1,11 @@
 import csv
 import json
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -13,6 +16,7 @@ from scripts.diagnostics.d01_moe8 import (
     analyze_split,
     build_prediction_rows,
     denormalize_scores,
+    load_gate_checkpoint_for_d01,
     normalize_raw_scores,
     prepare_format7_gate_payload,
     write_prediction_csv,
@@ -159,6 +163,58 @@ class D01Moe8Tests(unittest.TestCase):
                 self.assertEqual(audit["different_or_unavailable_files"], ["training/checkpoint_manager.py"])
                 self.assertEqual(origin, "reconstructed_from_checkpoint_source_hashes_format7")
 
+    def test_gate_loader_accepts_notebook_compatibility_hash_argument(self):
+        payload, checkpoint_source = self._format7_payload()
+        payload["expert_checkpoint_provenance"] = {"expert8": "frozen-sha"}
+        payload["config_sha256"] = "fixture-fingerprint"
+        payload["feature_store_identity_sha256"] = "fixture-fingerprint"
+        payload["expert_checkpoint_provenance_sha256"] = "fixture-fingerprint"
+        payload["gating_state_dict"] = {"gate.weight": "frozen-gate-state"}
+        runtime_source = dict(checkpoint_source)
+        runtime_source["model/expert_adapters/expert8_m2d_clap_adapter.py"] = "f" * 64
+
+        class Gate:
+            def load_state_dict(self, state, *, strict):
+                self.loaded_state = state
+                self.strict = strict
+
+        fake_torch = types.ModuleType("torch")
+        fake_torch.load = lambda *_args, **_kwargs: payload
+        fake_checkpoint_manager = types.ModuleType("training.checkpoint_manager")
+        fake_checkpoint_manager.FULL8_CHECKPOINT_FORMAT_VERSION = 5
+        fake_checkpoint_manager.MoeCheckpointManager = type("Manager", (), {})
+        fake_checkpoint_manager.full8_source_code_sha256 = lambda: runtime_source
+        validated_payloads = []
+        fake_checkpoint_manager._validate_gate_payload = lambda value, _gate: validated_payloads.append(value)
+        fake_checkpoint_manager._fingerprint = lambda *_args: "fixture-fingerprint"
+        fake_training = types.ModuleType("training")
+        fake_training.__path__ = []
+        fake_training.checkpoint_manager = fake_checkpoint_manager
+        gate = Gate()
+
+        with patch.dict(sys.modules, {
+            "torch": fake_torch,
+            "training": fake_training,
+            "training.checkpoint_manager": fake_checkpoint_manager,
+        }), patch(
+            "scripts.diagnostics.d01_moe8.prepare_format7_gate_payload",
+            wraps=prepare_format7_gate_payload,
+        ) as prepare:
+            loaded, _, audit, origin = load_gate_checkpoint_for_d01(
+                "frozen-gate.pt", gate=gate,
+                expected_expert_checkpoint_provenance=payload["expert_checkpoint_provenance"],
+                checkpoint_compat_source_hashes=checkpoint_source,
+            )
+
+        self.assertEqual(origin, "reconstructed_from_checkpoint_source_hashes_format7")
+        self.assertEqual(gate.loaded_state, payload["gating_state_dict"])
+        self.assertTrue(gate.strict)
+        self.assertEqual(loaded["source_code_sha256"], payload["source_code_sha256"])
+        self.assertEqual(validated_payloads[0]["source_code_sha256"], runtime_source)
+        self.assertIn("model/expert_adapters/expert8_m2d_clap_adapter.py",
+                      audit["different_or_unavailable_files"])
+        self.assertIs(prepare.call_args.kwargs["checkpoint_compat_source_hashes"], checkpoint_source)
+
     def test_format7_gate_rejects_changed_gate_source(self):
         payload, current = self._format7_payload()
         payload["source_code_sha256"]["model/moe_gating_core.py"] = "f" * 64
@@ -216,6 +272,13 @@ class D01Moe8Tests(unittest.TestCase):
         self.assertIn('WORK / "models/bert-base-uncased"', combined)
         self.assertIn('EXPERT8_TEXT_MODEL_ID = "google-bert/bert-base-uncased"', resource_source)
         self.assertIn("prepare_expert8_text_resource", combined)
+        setup_source = cells[4]
+        self.assertIn("inspect.signature(load_gate_checkpoint_for_d01)", setup_source)
+        self.assertIn("runtime_commit != SOURCE_COMMIT", setup_source)
+        self.assertLess(setup_source.index("inspect.signature(load_gate_checkpoint_for_d01)"),
+                        setup_source.index("prepare_expert8_text_resource(BERT_MODEL_DIR)"))
+        self.assertNotIn("DIAGNOSTIC_SOURCE", combined)
+        self.assertNotIn("diagnostic_path.write_text", combined)
         self.assertIn("snapshot_download", resource_source)
         self.assertIn("AutoTokenizer.from_pretrained(str(target), local_files_only=True)", resource_source)
         self.assertIn("AutoModel.from_pretrained(str(target), local_files_only=True)", resource_source)

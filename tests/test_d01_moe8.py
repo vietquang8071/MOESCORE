@@ -1,3 +1,4 @@
+import ast
 import csv
 import json
 import sys
@@ -240,6 +241,26 @@ class D01Moe8Tests(unittest.TestCase):
                 payload, current_source_hashes=runtime,
                 checkpoint_compat_source_hashes=bad_baseline,
             )
+
+    def test_notebook_gate_load_calls_share_checkpoint_compatibility_hashes(self):
+        root = Path(__file__).resolve().parents[1]
+        notebook = json.loads((root / "notebooks/XACLE2027_D01_MOE8_Kaggle.ipynb").read_text())
+        calls = []
+        for cell in notebook["cells"]:
+            source = "".join(cell.get("source", []))
+            if cell.get("cell_type") != "code" or "load_gate_checkpoint_for_d01(" not in source:
+                continue
+            for node in ast.walk(ast.parse(source)):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                        and node.func.id == "load_gate_checkpoint_for_d01"):
+                    calls.append(node)
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            keyword = next((item for item in call.keywords
+                            if item.arg == "checkpoint_compat_source_hashes"), None)
+            self.assertIsNotNone(keyword)
+            self.assertIsInstance(keyword.value, ast.Name)
+            self.assertEqual(keyword.value.id, "GATE_CHECKPOINT_COMPAT_SOURCE_HASHES")
 
     def test_kaggle_notebook_is_public_only_and_diagnostic_scoped(self):
         root = Path(__file__).resolve().parents[1]

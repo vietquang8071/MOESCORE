@@ -1,20 +1,16 @@
 {
   "id": "qnv8071/xacle2027-d02-moe8-gate-diagnostics",
-  "title": "XACLE2027 D02 MOE8 Gate Diagnostics",
+  "title": "XACLE 2027 \u2014 D02 MOE8 Gate Entropy Diagnostics",
   "code_file": "XACLE2027_D02_MOE8_Gate_Diagnostics_Kaggle.ipynb",
   "language": "python",
   "kernel_type": "notebook",
   "is_private": true,
-  "enable_gpu": true,
+  "enable_gpu": false,
   "enable_tpu": false,
   "enable_internet": true,
-  "machine_shape": "NvidiaTeslaT4",
   "dataset_sources": [
-    "qnv8071/moe8-bestgate",
-    "qnv8071/recovery",
-    "qnv8071/xacle-weights",
-    "qnv8071/xacle-2027-data",
-    "qnv8071/moescore-full9-feature-cache"
+    "qnv8071/moescore-full8-artifacts",
+    "qnv8071/xacle-2027-data"
   ],
   "competition_sources": [],
   "kernel_sources": [],

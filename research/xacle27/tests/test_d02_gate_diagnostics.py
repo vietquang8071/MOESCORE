@@ -217,84 +217,64 @@ class D02GateDiagnosticsTests(unittest.TestCase):
 
 
     def test_notebook_json_code_compiles_and_training_is_disabled(self):
-        path = Path(__file__).parents[3] / "notebooks/XACLE2027_D02_MOE8_Gate_Diagnostics_Kaggle.ipynb"
-        notebook = json.loads(path.read_text(encoding="utf-8"))
-        code_cells = [cell for cell in notebook["cells"] if cell["cell_type"] == "code"]
-        self.assertGreaterEqual(len(code_cells), 10)
-        for cell in code_cells:
-            compile("".join(cell["source"]), str(path), "exec")
-        source = "\n".join("".join(cell["source"]) for cell in code_cells)
+        root = Path(__file__).parents[3]
+        paths = [
+            root / "notebooks/XACLE2027_D02_MOE8_Gate_Diagnostics_Kaggle.ipynb",
+            root / "notebooks/kaggle/xacle2027-d02-moe8-gate-diagnostics/XACLE2027_D02_MOE8_Gate_Diagnostics_Kaggle.ipynb",
+        ]
+        sources = []
+        for path in paths:
+            notebook = json.loads(path.read_text(encoding="utf-8"))
+            code_cells = [cell for cell in notebook["cells"] if cell["cell_type"] == "code"]
+            self.assertGreaterEqual(len(code_cells), 10)
+            for cell in code_cells:
+                compile("".join(cell["source"]), str(path), "exec")
+            sources.append("\n".join("".join(cell["source"]) for cell in code_cells))
+        self.assertEqual(sources[0], sources[1])
+        source = sources[0]
+        self.assertIn('USE_PRECOMPUTED_FULL8_STORE = True', source)
         self.assertIn("TRAIN_GATE = False", source)
         self.assertIn("TRAIN_EXPERTS = False", source)
-        self.assertNotIn("xacle2027-evaluation-dataset", source)
-        self.assertIn("qnv8071/moe8-bestgate", source)
+        self.assertIn("RUN_FEATURE_EXTRACTION = False", source)
+        self.assertIn("RUN_FULL7_ASSEMBLY = False", source)
+        self.assertIn("RUN_FULL8_ASSEMBLY = False", source)
+        self.assertIn('RUN_PUBLIC_TEST_ANALYSIS = True', source)
+        self.assertNotIn("XACLE2027_evaluation_dataset", source)
+        self.assertNotIn("extract_expert8_features.py", source)
+        self.assertNotIn("build_full7_feature_store.py", source)
+        self.assertNotIn("build_full8_feature_store.py", source)
+        self.assertNotIn("snapshot_download", source)
 
-    def test_notebook_resolves_inputs_and_skips_cross_split_audio_checks(self):
+    def test_notebook_uses_precomputed_full8_store_and_pinned_compatible_source(self):
         path = Path(__file__).parents[3] / "notebooks/XACLE2027_D02_MOE8_Gate_Diagnostics_Kaggle.ipynb"
         notebook = json.loads(path.read_text(encoding="utf-8"))
         source = "\n".join(
             "".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code"
         )
-        self.assertIn('"recovery": "qnv8071/recovery"', source)
-        self.assertIn('slug = ref.rstrip("/").split("/")[-1]', source)
-        self.assertNotIn("filenames_by_split[left] & filenames_by_split[right]", source)
-        self.assertNotIn('set(manifest_ids(result["train"])) &', source)
-        self.assertNotIn(".duplicated()", source)
-        self.assertEqual(source.count('"--skip-cross-split-audio-overlap-check"'), 2)
-        self.assertNotIn('"--allow-train-validation-audio-overlap"', source)
-        self.assertNotIn('"--allow-public-split-audio-overlap"', source)
-        self.assertIn("RUN_PUBLIC_TEST_ANALYSIS = True", source)
+        self.assertIn('"qnv8071/moescore-full8-artifacts"', source)
+        self.assertIn('MOE8_SOURCE_COMMIT = "68124d0e57005d29149f659780ab749d14e09532"', source)
+        self.assertIn('D02_HELPER_COMMIT = "e337d5d34f0e3fd22c834be98fb62254b951e698"', source)
+        self.assertIn("resolve_precomputed_full8_artifacts", source)
+        self.assertIn("load_for_inference", source)
+        self.assertIn("validate_feature_store", source)
+        self.assertIn('("train", "validation", "test")', source)
+        self.assertIn("torch.inference_mode()", source)
+        self.assertIn("gate.eval()", source)
         self.assertIn("SKIP_CROSS_SPLIT_AUDIO_OVERLAP_CHECK = True", source)
-        self.assertIn('build_splits = list(required_splits)', source)
-        self.assertNotIn("if overlap_allowed:", source)
+        self.assertIn('"cross_split_audio_overlap": {"status": "SKIPPED"', source)
+        self.assertNotIn("_validate_full7_overlap_identity", source)
 
     def test_kaggle_kernel_metadata_updates_existing_public_d02_kernel_only(self):
         path = Path(__file__).parents[3] / "notebooks/kaggle/xacle2027-d02-moe8-gate-diagnostics/kernel-metadata.json"
         metadata = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(metadata["id"], "qnv8071/xacle2027-d02-moe8-gate-diagnostics")
         self.assertEqual(metadata["kernel_type"], "notebook")
-        self.assertNotIn("xacle2027-evaluation-dataset", metadata["dataset_sources"])
-
-    def test_dataset_root_finder_handles_repeated_slug_and_reports_missing_mounts(self):
-        path = Path(__file__).parents[3] / "notebooks/XACLE2027_D02_MOE8_Gate_Diagnostics_Kaggle.ipynb"
-        notebook = json.loads(path.read_text(encoding="utf-8"))
-        code = next(
-            "".join(cell["source"])
-            for cell in notebook["cells"]
-            if cell["cell_type"] == "code" and "def find_dataset_root(ref):" in "".join(cell["source"])
+        self.assertEqual(
+            set(metadata["dataset_sources"]),
+            {"qnv8071/moescore-full8-artifacts", "qnv8071/xacle-2027-data"},
         )
-        parsed = ast.parse(code)
-        finder = next(node for node in parsed.body if isinstance(node, ast.FunctionDef)
-                      and node.name == "find_dataset_root")
-        module = ast.Module(body=[finder], type_ignores=[])
-        with tempfile.TemporaryDirectory() as temporary:
-            input_root = Path(temporary)
-            recovery = input_root / "datasets" / "qnv8071" / "recovery"
-            recovery.mkdir(parents=True)
-            (recovery / "recovery").mkdir()
-            namespace = {"KAGGLE_INPUT": input_root, "Path": Path}
-            exec(compile(module, str(path), "exec"), namespace)
-            self.assertEqual(
-                namespace["find_dataset_root"]("qnv8071/recovery/recovery"),
-                recovery.resolve(),
-            )
-
-    def test_notebook_downloads_pinned_bert_and_reports_all_subprocess_output(self):
-        path = Path(__file__).parents[3] / "notebooks/XACLE2027_D02_MOE8_Gate_Diagnostics_Kaggle.ipynb"
-        notebook = json.loads(path.read_text(encoding="utf-8"))
-        source = "\n".join(
-            "".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code"
-        )
-        self.assertIn('BERT_REVISION = "86b5e0934494bd15c9632b12f734a8a67f723594"', source)
-        self.assertIn("snapshot_download(", source)
-        self.assertIn("force_download=True", source)
-        self.assertIn('"offline": False', source)
-        self.assertIn("capture_output=True", source)
-        self.assertIn("result.stdout", source)
-        self.assertIn("result.stderr", source)
-        self.assertIn("CalledProcessError", source)
-        self.assertEqual(source.count("subprocess.run("), 1)
-        self.assertNotIn("hf_text_cache", source)
+        self.assertFalse(metadata["enable_gpu"])
+        self.assertNotIn("machine_shape", metadata)
 
     def test_subprocess_helper_prints_success_failure_and_launch_errors(self):
         path = Path(__file__).parents[3] / "notebooks/XACLE2027_D02_MOE8_Gate_Diagnostics_Kaggle.ipynb"

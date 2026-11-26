@@ -1,0 +1,13 @@
+schema_version: 1
+experiment: MOE8-LOGO-Lite
+model_profile: full_8
+protocol: gate_only_target_selection
+benchmark_type: GATE_ONLY_PROXY_NOT_STRICT_DG
+dataset_name: XACLE_2027_data
+artifacts_name: moescore_full8_artifacts
+output_dir: /kaggle/working/moescore_full8_logo_lite_artifacts
+device: cuda:0
+seed: 2027
+control_model_names: [audiocaps]
+allow_train_validation_audio_overlap: true
+allow_public_split_audio_overlap: true

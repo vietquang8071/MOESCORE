@@ -146,7 +146,8 @@ def _validate_gate_payload(payload: Mapping[str, Any], gate: GatingNetwork) -> N
         profile != "full_8" or payload.get("expert_order") != list(order)
         or payload.get("expert_feature_dimensions") != dimensions
         or payload.get("gate_architecture") != FULL8_GATE_ARCHITECTURE
-        or payload.get("selection_policy") != "official_validation_srcc_strict_v1_provisional"
+        or payload.get("selection_policy") not in {
+            "official_validation_srcc_strict_v1_provisional", "logo_train_holdout_srcc_earliest_tie_v1"}
         or not isinstance(payload.get("expert_checkpoint_provenance"), Mapping)
         or set(payload["expert_checkpoint_provenance"]) != set(order)
         or not isinstance(payload.get("feature_store_identity"), Mapping)
@@ -292,6 +293,7 @@ class MoeCheckpointManager:
         best_srcc: Optional[float] = None,
         patience: int = 0,
         seed: int = 2027,
+        selection_policy: str = "official_validation_srcc_strict_v1_provisional",
     ) -> Path:
         if not isinstance(gating_network, GatingNetwork):
             raise ValueError("checkpoint must contain a verified gating network")
@@ -304,6 +306,9 @@ class MoeCheckpointManager:
             raise ValueError("patience and seed must be non-negative integers")
         if best_srcc is not None and (not isinstance(best_srcc, (int, float)) or not torch.isfinite(torch.tensor(float(best_srcc))).item()):
             raise ValueError("best_srcc must be finite or None")
+        if gating_network.profile == "full_8" and selection_policy not in {
+            "official_validation_srcc_strict_v1_provisional", "logo_train_holdout_srcc_earliest_tie_v1"}:
+            raise ValueError("unsupported Full8 checkpoint selection policy")
         config_body = json.loads(_canonical(dict(config), "config").decode("utf-8"))
         identity_body = json.loads(_canonical(dict(feature_store_identity), "feature_store_identity").decode("utf-8"))
         provenance_body = json.loads(_canonical(dict(expert_checkpoint_provenance), "expert_checkpoint_provenance").decode("utf-8"))
@@ -379,7 +384,7 @@ class MoeCheckpointManager:
                             "source_code_sha256": full7_source_code_sha256()})
         if gating_network.profile == "full_8":
             payload.update({"gate_architecture": FULL8_GATE_ARCHITECTURE,
-                            "selection_policy": "official_validation_srcc_strict_v1_provisional",
+                            "selection_policy": selection_policy,
                             "source_code_sha256": full8_source_code_sha256()})
         target = Path(path).expanduser().resolve()
         _atomic_torch_save(payload, target)

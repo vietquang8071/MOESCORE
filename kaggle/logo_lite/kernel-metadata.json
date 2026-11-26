@@ -1,0 +1,19 @@
+{
+  "id": "qnv8071/moe8-logo-lite",
+  "title": "MOE8 LOGO Lite",
+  "code_file": "../../notebooks/MOESCORE_Full8_LOGO_Lite_Kaggle.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "machine_shape": "NvidiaTeslaT4",
+  "dataset_sources": [
+    "qnv8071/xacle-2027-data",
+    "qnv8071/moescore-full8-artifacts"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

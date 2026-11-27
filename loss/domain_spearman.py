@@ -62,10 +62,16 @@ class DomainWiseSoftSpearmanLoss(nn.Module):
             raise ValueError("prediction, target and domain vectors must align")
         losses, valid, invalid = [], [], []
         per_domain = {}
+        invalid_reasons = {}
         for domain in torch.unique(model_ids, sorted=True).tolist():
             mask = model_ids == domain
-            if int(mask.sum()) < self.min_group_size or torch.unique(targets[mask]).numel() < 2:
+            if int(mask.sum()) < self.min_group_size:
                 invalid.append(int(domain))
+                invalid_reasons[int(domain)] = "too_small"
+                continue
+            if torch.unique(targets[mask]).numel() < 2:
+                invalid.append(int(domain))
+                invalid_reasons[int(domain)] = "constant_target"
                 continue
             loss = self.single(predictions[mask], targets[mask])
             losses.append(loss)
@@ -74,6 +80,7 @@ class DomainWiseSoftSpearmanLoss(nn.Module):
         if not losses:
             raise ValueError("all domain groups are invalid for Soft Spearman")
         self.last_per_domain = per_domain
+        self.last_invalid_reasons = invalid_reasons
         return torch.stack(losses).mean(), valid, invalid
 
 
@@ -90,4 +97,5 @@ class HybridSoftSpearmanLoss(nn.Module):
         if not torch.isfinite(total):
             raise FloatingPointError("hybrid Soft Spearman loss is nonfinite")
         return global_loss, domain_loss, total, {"valid_domains": valid, "invalid_domains": invalid,
-                                                "per_domain_loss": self.domain_loss.last_per_domain}
+                                                "per_domain_loss": self.domain_loss.last_per_domain,
+                                                "invalid_reasons": self.domain_loss.last_invalid_reasons}

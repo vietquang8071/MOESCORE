@@ -60,6 +60,7 @@ def train_step(gate, optimizer, batch, device, *, objective=None):
         "invalid_group_count": len(groups["invalid_domains"]),
         "valid_domains": groups["valid_domains"], "invalid_domains": groups["invalid_domains"],
         "per_domain_loss": groups["per_domain_loss"],
+        "invalid_reasons": groups["invalid_reasons"],
     }
 
 
@@ -311,6 +312,8 @@ def _run_dss(dataset_root, artifacts_root, output_dir, *, run_mode="full", devic
                "validation_srcc": val_srcc, "validation_macro_srcc": validation_aggregate["macro_srcc"],
                "learning_rate": optimizer.param_groups[0]["lr"], "best_epoch": selected_epoch,
                "epoch_gate_update_l2": float((gate.net[0].weight.detach() - first_layer_at_epoch_start).norm()),
+               "invalid_domain_reasons": json.dumps([record["invalid_reasons"] for record in records
+                                                      if record["invalid_reasons"]]),
                "per_domain_loss": json.dumps({domain: float(np.mean([record["per_domain_loss"][domain]
                   for record in records if domain in record["per_domain_loss"]]))
                   for domain in range(9) if any(domain in record["per_domain_loss"] for record in records)})}

@@ -42,6 +42,7 @@ def test_domain_loss_excludes_constant_target_and_hybrid_is_exact_half_mix():
     assert valid == [0] and invalid == [1]
     assert torch.allclose(total, 0.5 * (global_loss + domain_loss))
     assert details["valid_domains"] == [0]
+    assert details["invalid_reasons"] == {1: "constant_target"}
     with pytest.raises(ValueError, match="all domain groups"):
         DomainWiseSoftSpearmanLoss()(prediction, torch.ones(32), domains)
 

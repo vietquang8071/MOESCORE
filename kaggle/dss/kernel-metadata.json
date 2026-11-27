@@ -1,0 +1,18 @@
+{
+  "id": "qnv8071/moescore-full8-dss",
+  "title": "MOESCORE Full8 DSS - Domain-wise Soft Spearman",
+  "code_file": "MOESCORE_Full8_DSS_Kaggle.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_tpu": "false",
+  "enable_internet": "true",
+  "dataset_sources": [
+    "qnv8071/moescore-full8-artifacts",
+    "qnv8071/xacle-2027-data"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

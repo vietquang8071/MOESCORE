@@ -29,7 +29,7 @@ Full run: one fresh seed-2027 gate, all nine domains, batch 128, four domains ×
 
 ## Verification and limitations
 
-Targeted DSS plus Full8/D01 regression suite: 85 passed, 17 subtests passed, three expected overlap warnings. A full repository suite run with an import alias yielded 623 passed, one skipped, 12 failed in unrelated Expert2/3/4 and pre-existing Full9 notebook tests. Those components were not modified. The Full9 failure is a pre-existing notebook Python-version assertion (`3.13.16` versus `3.12`). The final targeted suite is rerun before push and recorded in the review report.
+Targeted DSS plus Full8/D01 regression suite including the pinned notebook: 86 passed, 17 subtests passed, three expected overlap warnings. A full repository suite run with an import alias yielded 623 passed, one skipped, 12 failed in unrelated Expert2/3/4 and pre-existing Full9 notebook tests. Those components were not modified. The Full9 failure is a pre-existing notebook Python-version assertion (`3.13.16` versus `3.12`).
 
 The preflight also hashes every official WAV and checks it against the cache fingerprint before creating the gate. The full 1.8 GB frozen cache and 3.6 GB official audio are available only on Kaggle; local checks used downloaded manifests/metadata, a small WAV fixture, and synthetic Full8 shards. Real shard and full WAV validation, CUDA execution, and all measured training/evaluation results remain unverified until the submitted Kaggle job runs. The first notebook submission is deliberately `RUN_MODE="smoke"` to honor the required stage gate, even though the notebook supports `RUN_MODE="full"` after smoke verification.
 

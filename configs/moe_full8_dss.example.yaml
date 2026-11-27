@@ -1,0 +1,18 @@
+experiment: MOE8-DSS
+model_profile: full_8
+seed: 2027
+gate: {input_dim: 33032, hidden_dim: 512, output_dim: 8, fresh_initialization: true}
+optimizer: {name: AdamW, learning_rate: 0.00001, weight_decay: 0.0001, scheduler: null}
+batch: {size: 128, domains: 4, samples_per_domain: 32, steps_per_epoch: 59}
+training_epochs: 30
+smoke_epochs: 2
+loss:
+  name: hybrid_l2_soft_spearman
+  global_weight: 0.5
+  domain_weight: 0.5
+  regularization: l2
+  regularization_strength: 0.1
+  min_domain_group_size: 8
+  target_ties: average
+validation_selection: full_split_hard_srcc_strict_max_earliest_tie
+inference_batch_size: 64
